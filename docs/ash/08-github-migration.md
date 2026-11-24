@@ -123,11 +123,20 @@ Executed after all UI polish and repository hygiene changes (JDK 21, Android SDK
 
 ## 11. GitHub Push & Remote Verification
 
-*(Updated upon completion of push to `https://github.com/prabal009/Ash.git`.)*
-
-- **Destination Remote:** `ash` → `https://github.com/prabal009/Ash.git`
-- **Target Branch:** `main` (normal non-force push)
-- **Push Status:** Pending push execution in next step.
+- **Destination Remote Configured:** `ash` → `https://github.com/prabal009/Ash.git` (`origin` preserved as `https://github.com/judejulius/jarvis.git`)
+- **Target Branch:** `main` (normal non-force push from `phase4-bluetooth-integration`)
+- **Pre-Push Remote Verification:** `git ls-remote ash` confirmed `https://github.com/prabal009/Ash.git` is empty (`isEmpty: true`).
+- **Push Attempt & Exact Blocker:**
+  - Command: `git push -u ash HEAD:main`
+  - Result: **BLOCKED (HTTP 403)** — `remote: Permission to prabal009/Ash.git denied to prabal009.`
+  - Root Cause: Active `gh` credential (`prabal009`, configured via `credential.https://github.com.helper = !/usr/bin/gh auth git-credential`) uses a fine-grained Personal Access Token (`github_pat_...`) that lacks write access (`Contents: Read and write` + `Workflows: Read and write`, or repository inclusion for `prabal009/Ash`).
+- **Local Commits Ready to Push (Clean Working Tree):**
+  - `a3471cb` — `Polish Ash obsidian-cyan UI theme, acoustic orb states, and repo hygiene`
+  - `cdaf26e` — `Redesign README with 30 FPS motion graphics, architecture diagram, and Ash screenshots`
+  - *(plus this migration report update commit)*
+- **Resolution Steps (Official GitHub Auth):**
+  1. Either update the `prabal009` fine-grained PAT in GitHub Settings → Developer settings → Personal access tokens to grant `prabal009/Ash` **Contents: Read and write** and **Workflows: Read and write**, **or** re-authenticate via OAuth with `gh auth login -h github.com -p https -w` (requesting `repo` + `workflow` scopes as `prabal009`).
+  2. Run `git push -u ash HEAD:main` from `/run/media/prabal/SANDISK E/Ash`.
 
 ---
 
