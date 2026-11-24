@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="460" viewBox="0 0 1000 460" role="img" aria-label="Project Ash System Architecture">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090D14"/>
+      <stop offset="100%" stop-color="#0D131E"/>
+    </linearGradient>
+    <linearGradient id="cyanLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#818CF8"/>
+    </linearGradient>
+    <marker id="arrowCyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38BDF8"/>
+    </marker>
+    <marker id="arrowIndigo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#818CF8"/>
+    </marker>
+    <marker id="arrowEmerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#34D399"/>
+    </marker>
+  </defs>
+
+  <!-- Outer Card -->
+  <rect x="4" y="4" width="992" height="452" rx="18" fill="url(#bg)" stroke="#243043" stroke-width="1.2"/>
+
+  <!-- Header -->
+  <text x="28" y="38" fill="#7DD3FC" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="600" letter-spacing="1.2">SYSTEM ARCHITECTURE · NATIVE ANDROID KOTLIN (API 26–35)</text>
+  <line x1="28" y1="52" x2="972" y2="52" stroke="#1E293B" stroke-width="1"/>
+
+  <!-- Column 1: Audio & Input -->
+  <rect x="28" y="76" width="208" height="154" rx="12" fill="#101723" stroke="#243043" stroke-width="1.2"/>
+  <circle cx="46" cy="98" r="4" fill="#38BDF8"/>
+  <text x="58" y="102" fill="#F1F5F9" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="700">Audio &amp; Bluetooth</text>
+  <text x="42" y="128" fill="#7DD3FC" font-family="ui-monospace, monospace" font-size="10.5">BluetoothAudioRouteController</text>
+  <text x="42" y="148" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Phone, Wired, HFP SCO &amp; BLE</text>
+  <text x="42" y="167" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Turn-scoped route negotiation</text>
+  <text x="42" y="186" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• HeadsetButtonBridge fallback</text>
+  <text x="42" y="205" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• RecordingCallback recovery</text>
+
+  <!-- Column 2: On-Device Speech -->
+  <rect x="272" y="76" width="212" height="154" rx="12" fill="#101723" stroke="#243043" stroke-width="1.2"/>
+  <circle cx="290" cy="98" r="4" fill="#38BDF8"/>
+  <text x="302" y="102" fill="#F1F5F9" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="700">On-Device Speech</text>
+  <text x="286" y="128" fill="#7DD3FC" font-family="ui-monospace, monospace" font-size="10.5">VoiceInput · sherpa-onnx</text>
+  <text x="286" y="148" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Zipformer KWS (3.3M int8)</text>
+  <text x="286" y="167" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• "Hey Ash" &amp; "Hello Ash"</text>
+  <text x="286" y="186" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Kroko streaming ASR + MicGain</text>
+  <text x="286" y="205" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• 1.5s pre-roll wake handoff</text>
+
+  <!-- Column 3: Orchestration & Routing -->
+  <rect x="520" y="76" width="212" height="154" rx="12" fill="#101723" stroke="#38BDF8" stroke-opacity="0.55" stroke-width="1.4"/>
+  <circle cx="538" cy="98" r="4" fill="#818CF8"/>
+  <text x="550" y="102" fill="#F1F5F9" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="700">Orchestration</text>
+  <text x="534" y="128" fill="#A5B4FC" font-family="ui-monospace, monospace" font-size="10.5">JarvisService (FGS mic)</text>
+  <text x="534" y="148" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• FastCommandRouter (offline)</text>
+  <text x="534" y="167" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• AiRouter (Auto/Online/Offline)</text>
+  <text x="534" y="186" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• TaskBoard + LockedCommands</text>
+  <text x="534" y="205" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• AshVoiceInteractionService</text>
+
+  <!-- Column 4: AI Providers -->
+  <rect x="768" y="76" width="204" height="154" rx="12" fill="#101723" stroke="#243043" stroke-width="1.2"/>
+  <circle cx="786" cy="98" r="4" fill="#818CF8"/>
+  <text x="798" y="102" fill="#F1F5F9" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="700">AI Reasoning</text>
+  <text x="782" y="128" fill="#A5B4FC" font-family="ui-monospace, monospace" font-size="10.5">PhoneAgent &amp; Llm</text>
+  <text x="782" y="148" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Anthropic Claude SDK</text>
+  <text x="782" y="167" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• OpenAI, Groq, Gemini, Router</text>
+  <text x="782" y="186" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Ollama, LM Studio, local LLM</text>
+  <text x="782" y="205" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Encrypted Keystore secrets</text>
+
+  <!-- Bottom Left: Android Execution & Safety -->
+  <rect x="28" y="276" width="456" height="152" rx="12" fill="#101723" stroke="#F59E0B" stroke-opacity="0.45" stroke-width="1.2"/>
+  <circle cx="46" cy="298" r="4" fill="#F59E0B"/>
+  <text x="58" y="302" fill="#F1F5F9" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="700">Android Execution &amp; Authorization Layer</text>
+  <text x="42" y="328" fill="#FCD34D" font-family="ui-monospace, monospace" font-size="10.5">FastActionExecutor · JarvisAccessibilityService · ScreenReader</text>
+  <text x="42" y="350" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• DirectCallPolicy + TelecomManager.placeCall / ACTION_DIAL + cooldown</text>
+  <text x="42" y="370" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Verified UI tree taps, editable fields, clickable-ancestor &amp; gestures</text>
+  <text x="42" y="390" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Blocks banking/wallet/installer apps, password fields &amp; FLAG_SECURE</text>
+  <text x="42" y="410" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• OneUseApproval spoken confirmation gate before sensitive controls</text>
+
+  <!-- Bottom Right: Voice Output & UI -->
+  <rect x="520" y="276" width="452" height="152" rx="12" fill="#101723" stroke="#34D399" stroke-opacity="0.45" stroke-width="1.2"/>
+  <circle cx="538" cy="298" r="4" fill="#34D399"/>
+  <text x="550" y="302" fill="#F1F5F9" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="700">Spoken Output &amp; Live Feedback</text>
+  <text x="534" y="328" fill="#6EE7B7" font-family="ui-monospace, monospace" font-size="10.5">Speaker · Kokoro · ReplyStreamer · AudioOut · TaskIsland</text>
+  <text x="534" y="350" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Kokoro-82M int8 neural TTS (clause streaming + wake pre-warm)</text>
+  <text x="534" y="370" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Cloud TTS fallbacks (OpenAI, ElevenLabs, Fish) &amp; SystemVoice</text>
+  <text x="534" y="390" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Transient audio-focus ducking (resumes music) &amp; barge-in</text>
+  <text x="534" y="410" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="11">• Dynamic TaskIsland overlay + local SQLite FTS4 MemoryStore</text>
+
+  <!-- Connectors -->
+  <line x1="236" y1="153" x2="268" y2="153" stroke="#38BDF8" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <line x1="484" y1="153" x2="516" y2="153" stroke="#38BDF8" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <line x1="732" y1="143" x2="764" y2="143" stroke="#818CF8" stroke-width="1.8" marker-end="url(#arrowIndigo)"/>
+  <line x1="768" y1="165" x2="736" y2="165" stroke="#818CF8" stroke-width="1.8" marker-end="url(#arrowIndigo)"/>
+
+  <!-- Down connectors from Orchestration -->
+  <path d="M 590 230 L 590 253 L 260 253 L 260 272" fill="none" stroke="#38BDF8" stroke-width="1.8" marker-end="url(#arrowCyan)"/>
+  <path d="M 656 230 L 656 272" fill="none" stroke="#34D399" stroke-width="1.8" marker-end="url(#arrowEmerald)"/>
+
+  <!-- Labels on connectors -->
+  <text x="392" y="248" fill="#64748B" font-family="ui-monospace, monospace" font-size="10">verified actions</text>
+  <text x="668" y="256" fill="#64748B" font-family="ui-monospace, monospace" font-size="10">streamed speech</text>
+</svg>
