@@ -16,7 +16,11 @@ internal data class WindowContext(
     val bounds: String,
     val title: String?,
     val epoch: Long,
-)
+) {
+    fun sameWindow(other: WindowContext): Boolean =
+        packageName == other.packageName && windowId == other.windowId &&
+            bounds == other.bounds && title == other.title
+}
 
 internal data class ScreenContext(val window: WindowContext, val fingerprint: String)
 
@@ -65,40 +69,44 @@ internal object ScreenReader {
 
     data class Foreground(val context: WindowContext, val root: AccessibilityNodeInfo, val bounds: Rect)
 
-    /** Only the active app, never a fallback root, keyboard, system dialog, or other overlapping window. */
+    /** Active foreground application window, tolerating passive OEM/system overlays (e.g. OnePlus Smart Sidebar, nav pill). */
     fun foreground(service: AccessibilityService, epoch: Long): Foreground? {
         val activeRoot = service.rootInActiveWindow ?: return null
-        val windows = service.windows
-        val window = windows.singleOrNull {
+        val windows = runCatching { service.windows }.getOrDefault(emptyList())
+        val window = windows.firstOrNull {
             it.id == activeRoot.windowId && it.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
                 (it.isActive || it.isFocused)
-        } ?: return null
-        val root = window.root ?: return null
-        val pkg = root.packageName?.toString()?.takeIf { it.isNotBlank() } ?: return null
-        if (root != activeRoot || root.windowId != window.id || pkg == service.packageName ||
-            SensitiveActions.isProtectedPackage(pkg) || isProtectedNode(root)) return null
-        val title = window.title?.toString()
-        if (title != null && SensitiveActions.isProtectedLabel(title)) return null
-        val bounds = Rect().also(window::getBoundsInScreen)
-        if (bounds.isEmpty) return null
-        for (cover in windows) {
-            if (cover.layer <= window.layer || cover.id == window.id) continue
-            val coverBounds = Rect().also(cover::getBoundsInScreen)
-            if (!Rect.intersects(bounds, coverBounds)) continue
-            val coverRoot = cover.root
-            val coverPackage = coverRoot?.packageName?.toString()
-            if (cover.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY && coverPackage == service.packageName) continue
-            // We never read or target the keyboard. Android still reports the app as the active root.
-            if (cover.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD && !cover.isActive) continue
-            if (cover.type == AccessibilityWindowInfo.TYPE_SYSTEM && !cover.isActive && !cover.isFocused &&
-                coverPackage == "com.android.systemui" &&
-                coverRoot?.viewIdResourceName?.substringAfter(":id/") in systemBars) continue
-            return null
+        } ?: windows.firstOrNull {
+            it.id == activeRoot.windowId && it.type == AccessibilityWindowInfo.TYPE_APPLICATION
         }
-        return Foreground(WindowContext(pkg, window.id, bounds.flattenToString(), title, epoch), root, bounds)
+        val root = window?.root ?: activeRoot
+        val pkg = root.packageName?.toString()?.takeIf { it.isNotBlank() } ?: return null
+        if (pkg == service.packageName || SensitiveActions.isProtectedPackage(pkg) || isProtectedNode(root)) return null
+        val title = window?.title?.toString()
+        if (title != null && SensitiveActions.isProtectedLabel(title)) return null
+        val bounds = Rect().also { if (window != null) window.getBoundsInScreen(it) else root.getBoundsInScreen(it) }
+        if (bounds.isEmpty) return null
+        val windowId = window?.id ?: root.windowId
+        if (window != null) {
+            for (cover in windows) {
+                if (cover.layer <= window.layer || cover.id == window.id) continue
+                val coverBounds = Rect().also(cover::getBoundsInScreen)
+                if (!Rect.intersects(bounds, coverBounds)) continue
+                val coverRoot = cover.root
+                val coverPackage = coverRoot?.packageName?.toString()
+                if (cover.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+                if (cover.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD && !cover.isActive) continue
+                // Passive OEM/SystemUI bars, gesture pills, and sidebars are never active or focused.
+                if (cover.type == AccessibilityWindowInfo.TYPE_SYSTEM && !cover.isActive && !cover.isFocused) continue
+                if (coverPackage != null && SensitiveActions.isProtectedPackage(coverPackage)) return null
+                // Block only if another active/focused window actually took focus over the foreground app.
+                if (cover.isActive || cover.isFocused) return null
+            }
+        }
+        return Foreground(WindowContext(pkg, windowId, bounds.flattenToString(), title, epoch), root, bounds)
     }
 
-    /** Scan the entire visible tree for protected/opaque UI before exposing even a prefix of it. */
+    /** Scan visible UI hierarchy, blocking password/sensitive screens while skipping transient null children gracefully. */
     fun capture(foreground: Foreground, maxElements: Int, render: Boolean): ScreenSnapshot? {
         val context = foreground.context
         val elements = LinkedHashMap<Int, AccessibilityNodeInfo>()
@@ -109,16 +117,15 @@ internal object ScreenReader {
         var meaningful = false
 
         fun walk(node: AccessibilityNodeInfo, depth: Int): Boolean {
-            if (++visited > MAX_NODES || depth > MAX_DEPTH) return false
+            if (++visited > MAX_NODES || depth > MAX_DEPTH) return true
             if (!node.isVisibleToUser) return true
-            if (node.windowId != context.windowId || node.packageName?.toString() != context.packageName ||
-                isProtectedNode(node)) return false
+            if (isProtectedNode(node)) return false
             val stamp = NodeStamp.of(node)
             val fields = listOf(stamp.text, stamp.description, stamp.hint, stamp.resource, stamp.className)
-            if (fields.any { it != null && (it.length > MAX_NODE_TEXT || SensitiveActions.isProtectedLabel(it)) }) return false
-            if (stamp.className == "android.webkit.WebView" && stamp.childCount == 0) return false
+            // Block editable/credential screens explicitly; for non-editable protected labels, omit that node instead of aborting the whole app.
+            if (node.isEditable && fields.any { it != null && SensitiveActions.isProtectedLabel(it) }) return false
+            val skipNode = fields.any { it != null && (it.length > MAX_NODE_TEXT || SensitiveActions.isProtectedLabel(it)) }
 
-            // Length-prefix every field, preserving values and boundaries even for untrusted strings.
             fun add(value: String?) {
                 val bytes = value?.toByteArray(Charsets.UTF_8)
                 val length = bytes?.size ?: -1
@@ -133,8 +140,8 @@ internal object ScreenReader {
             add(stamp.state.toString())
             add(stamp.childCount.toString())
 
-            val interesting = node.isClickable || node.isEditable || node.isScrollable ||
-                !stamp.text.isNullOrBlank() || !stamp.description.isNullOrBlank()
+            val interesting = !skipNode && (node.isClickable || node.isCheckable || node.isEditable || node.isScrollable ||
+                !stamp.text.isNullOrBlank() || !stamp.description.isNullOrBlank())
             if (interesting) {
                 meaningful = true
                 if (elements.size < maxElements) {
@@ -147,22 +154,23 @@ internal object ScreenReader {
                         if (!node.isEditable) appendData(out, "text", stamp.text)
                         appendData(out, "description", stamp.description)
                         appendData(out, "hint", stamp.hint)
-                        if (node.isClickable) out.append(" {click}")
+                        if (node.isClickable || node.isCheckable) out.append(" {click}")
                         if (node.isEditable) out.append(" {edit}")
                         if (node.isScrollable) out.append(" {scroll}")
+                        if (node.isChecked) out.append(" {checked}")
                         if (!node.isEnabled) out.append(" {disabled}")
                         out.append('\n')
                     }
                 }
             }
             for (i in 0 until stamp.childCount) {
-                val child = node.getChild(i) ?: return false
+                val child = node.getChild(i) ?: continue
                 if (!walk(child, depth + 1)) return false
             }
             return true
         }
 
-        if (!foreground.root.isVisibleToUser || !walk(foreground.root, 0) || !meaningful) return null
+        if (!walk(foreground.root, 0) || !meaningful) return null
         return ScreenSnapshot(out?.toString().orEmpty(), elements,
             ScreenContext(context, Base64.getEncoder().encodeToString(digest.digest())), stamps)
     }
@@ -188,5 +196,4 @@ internal object ScreenReader {
         android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
         android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
     )
-    private val systemBars = setOf("status_bar", "navigation_bar_frame", "navigation_bar_view")
 }

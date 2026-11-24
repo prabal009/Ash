@@ -157,7 +157,24 @@ class FastActionExecutor(
         }
         is FastCommand.SetAlarm -> setAlarm(cmd, check)
         is FastCommand.SetTimer -> setTimer(cmd, check)
-        is FastCommand.Dial -> confirmDial(cmd.number, null, asker, recordStep, check)
+        is FastCommand.Dial -> {
+            val dialable = ContactMatcher.dialableNumber(cmd.number)
+            val now = SystemClock.elapsedRealtime()
+            if (dialable != null && DirectCallPolicy.canPlaceAfterClarification(
+                    directEnabled = settings.directContactCalls,
+                    hasCallPermission = resolver.hasCallPermission(),
+                    spokenRequest = spokenRequest,
+                    number = dialable,
+                    nowMs = now,
+                    lastAttemptMs = lastDirectAttempt,
+                    context = app,
+                )
+            ) {
+                placeDirectCall(null, dialable, recordStep, check)
+            } else {
+                confirmDial(cmd.number, null, asker, recordStep, check)
+            }
+        }
         is FastCommand.CallContact -> callContact(cmd.name, spokenRequest, asker, recordStep, check)
         FastCommand.Screenshot -> withPhoneControl(check) { svc ->
             val msg = svc.pressKey("screenshot")
@@ -624,42 +641,58 @@ class FastActionExecutor(
         if (allowDirect) {
             return placeDirectCall(contact, dialable, recordStep, check)
         }
+        val canDirectAfterConfirm = settings.directContactCalls &&
+            resolver.hasCallPermission() &&
+            !spokenRequest.isNullOrBlank() &&
+            !DirectCallPolicy.isEmergencyOrSpecial(dialable, app) &&
+            (lastDirectAttempt == Long.MIN_VALUE || now - lastDirectAttempt >= DirectCallPolicy.COOLDOWN_MS)
+        if (canDirectAfterConfirm && asker != null) {
+            check()
+            val answer = asker("Call ${contact.name}, ${number.type} $dialable? Say yes to call.")
+            check()
+            return if (ContactMatcher.confirmsDial(answer)) {
+                placeDirectCall(contact, dialable, recordStep, check)
+            } else {
+                Result(true, false, "I didn't place the call.")
+            }
+        }
         return confirmDial(dialable, contact, asker, recordStep, check, number.type)
     }
 
     private fun placeDirectCall(
-        contact: ContactEntry,
+        contact: ContactEntry?,
         number: String,
         recordStep: (String) -> Unit,
         check: () -> Unit,
     ): Result {
-        if (!resolver.stillHasNumber(contact, number)) {
+        if (contact != null && !resolver.stillHasNumber(contact, number)) {
             return Result(true, false, "The contact or number is no longer available. Please ask again.")
         }
+        val label = contact?.name ?: number
         check()
         // Reserve cooldown BEFORE dispatch so an uncertain platform failure never redials.
         lastDirectAttempt = SystemClock.elapsedRealtime()
-        recordStep("Requested direct call to ${contact.name}.")
+        recordStep("Requested direct call to $label.")
         val uri = Uri.fromParts("tel", number, null)
+        // Prefer TelecomManager.placeCall (background-safe on Android 10–15 without BAL blocks);
+        // fall back to ACTION_CALL (routed via AccessibilityService when bound) if TelecomManager is unavailable.
         val placed = try {
             val telecom = app.getSystemService(TelecomManager::class.java)
             if (telecom != null) {
                 telecom.placeCall(uri, Bundle())
                 true
-            } else {
-                startIntent(Intent(Intent.ACTION_CALL, uri), check, direct = true)
-            }
+            } else false
         } catch (e: SecurityException) {
             Log.w(TAG, "Direct call permission denied (${e.javaClass.simpleName})")
             false
         } catch (e: RuntimeException) {
-            Log.w(TAG, "Direct call failed (${e.javaClass.simpleName})")
+            Log.w(TAG, "Direct call via TelecomManager failed (${e.javaClass.simpleName})")
             false
-        }
+        } || startIntent(Intent(Intent.ACTION_CALL, uri), check, direct = false)
         return if (placed) {
-            Result(true, true, "Calling ${contact.name}.", irreversible = true)
+            Result(true, true, "Calling $label.", irreversible = true)
         } else {
-            Result(true, false, "Android didn't start the call to ${contact.name}. Check Phone permission or use the Phone app.")
+            Result(true, false, "Android didn't start the call to $label. Enable Direct contact calls and Phone permission in Ash Settings.")
         }
     }
 

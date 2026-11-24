@@ -1,23 +1,26 @@
 package com.jarvis.assistant.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.app.KeyguardManager
 import android.app.SearchManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Path
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction
 import androidx.annotation.RequiresApi
 import com.jarvis.assistant.agent.OneUseApproval
 import com.jarvis.assistant.agent.SensitiveActions
-import com.jarvis.assistant.apps.ScreenItem
 import com.jarvis.assistant.apps.YouTubeAction
 import com.jarvis.assistant.router.AppEntry
 import com.jarvis.assistant.router.AppMatcher
@@ -25,6 +28,7 @@ import com.jarvis.assistant.router.FastCommand
 import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 internal enum class Direction { UP, DOWN, LEFT, RIGHT }
@@ -99,7 +103,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     private fun sameForeground(expected: WindowContext): ScreenReader.Foreground =
-        foreground().also { if (it.context != expected) throw ManualScreenStep(CHANGED) }
+        foreground().also { if (!it.context.sameWindow(expected)) throw ManualScreenStep(CHANGED) }
 
     private fun verifiedSnapshot(maxElements: Int, render: Boolean, cancelled: () -> Boolean): ScreenSnapshot {
         checkRunning(cancelled)
@@ -119,7 +123,7 @@ class JarvisAccessibilityService : AccessibilityService() {
      */
     @RequiresApi(34)
     private fun canCaptureWindow(window: WindowContext, cancelled: () -> Boolean): Boolean {
-        repeat(2) { attempt ->
+        repeat(3) { attempt ->
             checkRunning(cancelled)
             sameForeground(window)
             val done = CountDownLatch(1)
@@ -139,12 +143,26 @@ class JarvisAccessibilityService : AccessibilityService() {
             val deadline = SystemClock.elapsedRealtime() + 1_500
             while (!done.await(50, TimeUnit.MILLISECONDS)) {
                 checkRunning(cancelled)
-                if (SystemClock.elapsedRealtime() >= deadline) return false
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    Log.w(TAG, "Window capture timed out for ${window.packageName}#${window.windowId}")
+                    return false
+                }
             }
             if (result == CAPTURE_ALLOWED) return true
-            if (result != ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT || attempt != 0) return false
-            // The platform enforces a 333 ms per-window interval.
-            Thread.sleep(350)
+            if (result == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW) {
+                Log.w(TAG, "Blocked FLAG_SECURE window ${window.packageName}#${window.windowId}")
+                return false
+            }
+            if (result != ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT || attempt == 2) {
+                Log.w(TAG, "Window capture failed (code=$result) for ${window.packageName}#${window.windowId}")
+                return false
+            }
+            // The platform enforces a per-window screenshot interval (333 ms+); pause briefly and retry.
+            val waitEnd = SystemClock.elapsedRealtime() + 400L * (attempt + 1)
+            while (SystemClock.elapsedRealtime() < waitEnd) {
+                checkRunning(cancelled)
+                Thread.sleep(50)
+            }
         }
         return false
     }
@@ -157,9 +175,36 @@ class JarvisAccessibilityService : AccessibilityService() {
         val target: String = "",
         val payload: String = "",
         val app: AppEntry? = null,
+        val needsConfirm: Boolean = false,
+        val targetStamp: NodeStamp? = null,
+        val otherStamp: NodeStamp? = null,
     )
 
-    private data class ApprovalBinding(val turn: Any, val screen: ScreenContext, val plan: Plan)
+    private data class ApprovalBinding(
+        val turn: Any,
+        val window: WindowContext,
+        val action: Int?,
+        val target: String,
+        val payload: String,
+        val app: AppEntry?,
+        val needsConfirm: Boolean,
+        val targetStamp: NodeStamp?,
+        val otherStamp: NodeStamp?,
+    ) {
+        companion object {
+            fun of(turn: Any, window: WindowContext, plan: Plan) = ApprovalBinding(
+                turn = turn,
+                window = window.copy(epoch = 0L),
+                action = plan.action,
+                target = plan.target,
+                payload = plan.payload,
+                app = plan.app,
+                needsConfirm = plan.needsConfirm,
+                targetStamp = plan.targetStamp,
+                otherStamp = plan.otherStamp,
+            )
+        }
+    }
 
     internal fun execute(
         screen: ScreenSnapshot,
@@ -184,12 +229,25 @@ class JarvisAccessibilityService : AccessibilityService() {
         val context = screen.context ?: throw ManualScreenStep(UNAVAILABLE)
         fun qualify(): Pair<ScreenSnapshot, Plan> {
             val live = verifiedSnapshot(maxElements, false, cancelled)
-            if (live.context != context) throw ManualScreenStep(CHANGED)
-            val plan = plan(live, request)
+            val liveCtx = live.context ?: throw ManualScreenStep(CHANGED)
+            if (!liveCtx.window.sameWindow(context.window)) throw ManualScreenStep(CHANGED)
+            fun resolveId(origId: Int): Int {
+                val origStamp = screen.stamps[origId] ?: throw ManualScreenStep(CHANGED)
+                if (live.stamps[origId] == origStamp) return origId
+                return live.stamps.entries.singleOrNull { it.value == origStamp }?.key
+                    ?: throw ManualScreenStep(CHANGED)
+            }
+            val remapped = when (request) {
+                is ScreenAction.Tap -> ScreenAction.Tap(resolveId(request.id))
+                is ScreenAction.Edit -> ScreenAction.Edit(resolveId(request.id), request.text)
+                is ScreenAction.Search -> ScreenAction.Search(resolveId(request.buttonId), resolveId(request.fieldId))
+                is ScreenAction.Read -> ScreenAction.Read(resolveId(request.id))
+                is ScreenAction.Scroll -> ScreenAction.Scroll(request.id?.let(::resolveId), request.direction, request.page)
+                is ScreenAction.Navigate, is ScreenAction.Open -> request
+            }
+            val plan = plan(live, remapped)
             for (id in listOfNotNull(plan.id, plan.otherId)) {
-                if (live.elements[id] != screen.elements[id] || live.stamps[id] != screen.stamps[id]) {
-                    throw ManualScreenStep(CHANGED)
-                }
+                if (live.elements[id] == null || live.stamps[id] == null) throw ManualScreenStep(CHANGED)
             }
             return live to plan
         }
@@ -200,9 +258,12 @@ class JarvisAccessibilityService : AccessibilityService() {
             is ScreenAction.Edit -> if (explicitEdit) null else "Replace ${plan.target} in $app with “${plan.payload}”? Say yes to type it."
             is ScreenAction.Search -> "Submit the search “${plan.payload}” in $app? Say yes to search."
             is ScreenAction.Read -> "Read the selected on-screen text from $app aloud? Say yes to read it."
+            is ScreenAction.Tap -> if (plan.needsConfirm) "Tap “${plan.target}” in $app? Say yes to confirm." else null
             else -> null
         }
-        val approval = question?.let { OneUseApproval(ApprovalBinding(turn, context, plan), SystemClock.elapsedRealtime()) }
+        val approval = question?.let {
+            OneUseApproval(ApprovalBinding.of(turn, context.window, plan), SystemClock.elapsedRealtime())
+        }
         val answer = if (question != null) {
             checkRunning(cancelled)
             ask(question)
@@ -218,23 +279,43 @@ class JarvisAccessibilityService : AccessibilityService() {
         sameForeground(context.window)
         val node = plan.id?.let { refreshTarget(live, it) }
         plan.otherId?.let { refreshTarget(live, it) }
-        sameForeground(context.window)
+        val fg = sameForeground(context.window)
         if (approval != null &&
-            !approval.consume(ApprovalBinding(turn, context, plan), answer, SystemClock.elapsedRealtime(), cancelled())) {
+            !approval.consume(ApprovalBinding.of(turn, context.window, plan), answer, SystemClock.elapsedRealtime(), cancelled())) {
             throw ManualScreenStep("That approval expired or the action changed. I stopped without doing it.")
         }
         checkRunning(cancelled)
         if (request is ScreenAction.Read) return ScreenEffect("The selected text says: “${plan.payload}”", verified = true)
 
         // Once dispatch is possible, a provider error must not replay the step through a fallback.
-        dispatching(request is ScreenAction.Search)
+        dispatching(request is ScreenAction.Search || (request is ScreenAction.Tap && plan.needsConfirm))
         checkRunning(cancelled)
         val accepted = when (request) {
             is ScreenAction.Open -> startLauncher(plan.app ?: throw ManualScreenStep(UNAVAILABLE))
             is ScreenAction.Navigate -> performGlobalAction(plan.action ?: throw ManualScreenStep(UNAVAILABLE))
             is ScreenAction.Edit -> {
+                val field = checkNotNull(node)
+                if (!field.isFocused) {
+                    field.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    field.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
                 val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, plan.payload) }
-                checkNotNull(node).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            }
+            is ScreenAction.Tap -> {
+                val targetNode = checkNotNull(node)
+                val clickNode = findClickableAncestor(targetNode)
+                val clicked = clickNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+                clicked || dispatchTapGesture(targetNode, fg.bounds, cancelled)
+            }
+            is ScreenAction.Scroll -> {
+                val scrolled = if (node != null && plan.action != null) node.performAction(plan.action) else false
+                scrolled || dispatchSwipeGesture(
+                    node?.let { Rect().also(it::getBoundsInScreen) }?.takeUnless { it.isEmpty } ?: fg.bounds,
+                    fg.bounds,
+                    request.direction,
+                    cancelled,
+                )
             }
             else -> checkNotNull(node).performAction(checkNotNull(plan.action))
         }
@@ -247,15 +328,18 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
             is ScreenAction.Edit -> {
                 val field = checkNotNull(node)
-                val verified = sameForeground(context.window).context == context.window && field.refresh() &&
+                val verified = sameForeground(context.window).context.sameWindow(context.window) && field.refresh() &&
                     field.isVisibleToUser && !ScreenReader.isProtectedNode(field) && field.text?.toString() == plan.payload
                 if (verified) ScreenEffect("Typed the text in the selected field. I didn’t submit it.", true)
                 else ScreenEffect("Requested text entry, but couldn’t verify the field afterwards.")
             }
             is ScreenAction.Search -> ScreenEffect("Requested the search. I haven’t verified its results.")
-            is ScreenAction.Tap -> ScreenEffect("Tapped the selected control.")
-            is ScreenAction.Scroll -> ScreenEffect(if (request.page) "Requested a page swipe." else "Requested a scroll.")
-            is ScreenAction.Navigate -> ScreenEffect("Requested ${request.key.name.lowercase().replace('_', ' ')}.")
+            is ScreenAction.Tap -> ScreenEffect("Tapped ${plan.target}.", verified = true)
+            is ScreenAction.Scroll -> ScreenEffect(
+                if (request.page) "Swiped ${request.direction.name.lowercase()}." else "Scrolled ${request.direction.name.lowercase()}.",
+                verified = true,
+            )
+            is ScreenAction.Navigate -> ScreenEffect("Pressed ${request.key.name.lowercase().replace('_', ' ')}.", verified = true)
             is ScreenAction.Read -> error("Read does not dispatch a platform action")
         }
     }
@@ -267,18 +351,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         fun editableLabel(id: Int): String {
             val field = target(id)
             val info = stamp(id)
-            val label = listOfNotNull(info.hint, info.description).firstOrNull(SensitiveActions::isEditableLabel)
-            if (!field.isEditable || label == null || !SensitiveActions.canQuote(label, 40) ||
-                info.inputType and android.text.InputType.TYPE_MASK_CLASS != android.text.InputType.TYPE_CLASS_TEXT ||
-                AccessibilityNodeInfo.ACTION_SET_TEXT !in info.actions) {
+            val resource = info.resource.orEmpty().substringAfter(":id/")
+            val protectedField = ScreenReader.isProtectedNode(field) ||
+                listOfNotNull(info.hint, info.description, resource).any(SensitiveActions::isProtectedLabel)
+            if (!field.isEditable || protectedField || AccessibilityNodeInfo.ACTION_SET_TEXT !in info.actions) {
                 throw ManualScreenStep("I can’t verify that this is a non-secret text field. Type into it manually.")
             }
-            return label
+            return listOfNotNull(info.hint, info.description)
+                .firstOrNull { it.isNotBlank() && SensitiveActions.canQuote(it, 60) }
+                ?: "text field"
         }
         return when (request) {
             is ScreenAction.Edit -> {
                 if (!SensitiveActions.canQuote(request.text, 160)) throw ManualScreenStep("I can’t review that text safely. Type it manually.")
-                Plan(request, id = request.id, target = editableLabel(request.id), payload = request.text)
+                Plan(request, id = request.id, target = editableLabel(request.id), payload = request.text, targetStamp = stamp(request.id))
             }
             is ScreenAction.Search -> {
                 val search = target(request.buttonId)
@@ -294,36 +380,69 @@ class JarvisAccessibilityService : AccessibilityService() {
                     searchFields != 1 || !SensitiveActions.canQuote(query, 160) || target(request.fieldId).isShowingHintText) {
                     throw ManualScreenStep("I can’t verify which search the button would submit. Submit it manually.")
                 }
-                Plan(request, request.buttonId, request.fieldId, AccessibilityNodeInfo.ACTION_CLICK, label, query)
+                Plan(
+                    request, request.buttonId, request.fieldId, AccessibilityNodeInfo.ACTION_CLICK, label, query,
+                    targetStamp = button, otherStamp = field,
+                )
             }
             is ScreenAction.Tap -> {
                 val node = target(request.id)
                 val info = stamp(request.id)
-                val labels = listOfNotNull(info.text.takeUnless { node.isEditable }, info.description, info.hint).filter { it.isNotBlank() }
-                val resource = info.resource.orEmpty().substringAfter(":id/")
-                val youtubeVideo = screen.foregroundPackage == YouTubeAction.packageName &&
-                    info.description.orEmpty().trim().endsWith("play video", ignoreCase = true) &&
-                    YouTubeAction.pickResult(listOf(ScreenItem(request.id, info.description.orEmpty(), true))) != null
-                val navigation = labels.isNotEmpty() && labels.all(SensitiveActions::isNavigationLabel)
-                val emptySearch = !hasOnlySearchLabel(info) ||
-                    screen.elements.none { (id, elem) -> elem.isEditable && !elem.isShowingHintText && !stamp(id).text.isNullOrBlank() }
-                if (!isDirectClick(node, info) || labels.any(SensitiveActions::needsConfirmation) ||
-                    SensitiveActions.needsConfirmation(resource) ||
-                    !(youtubeVideo || (navigation && emptySearch) || (node.isEditable && editableLabel(request.id).isNotBlank()))) {
-                    throw ManualScreenStep("I can’t verify what that tap would do. Use the visible control yourself.")
+                val clickTarget = findClickableAncestor(node)
+                val labels = buildList {
+                    info.text.takeUnless { node.isEditable }?.takeIf { it.isNotBlank() }?.let(::add)
+                    info.description?.takeIf { it.isNotBlank() }?.let(::add)
+                    info.hint?.takeIf { it.isNotBlank() }?.let(::add)
+                    if (clickTarget != null && clickTarget !== node) {
+                        clickTarget.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let(::add)
+                    }
                 }
-                Plan(request, id = request.id, action = AccessibilityNodeInfo.ACTION_CLICK)
+                val resources = listOfNotNull(
+                    info.resource?.substringAfter(":id/")?.takeIf { it.isNotBlank() },
+                    clickTarget?.takeIf { it !== node }?.viewIdResourceName?.substringAfter(":id/")?.takeIf { it.isNotBlank() },
+                )
+                if (ScreenReader.isProtectedNode(node) || (clickTarget != null && ScreenReader.isProtectedNode(clickTarget)) ||
+                    labels.any(SensitiveActions::isProtectedLabel) || resources.any(SensitiveActions::isProtectedLabel)) {
+                    throw ManualScreenStep("I won’t tap a protected or credential control. Use the screen yourself.")
+                }
+                val bounds = Rect().also(node::getBoundsInScreen)
+                if (clickTarget == null && bounds.isEmpty) {
+                    throw ManualScreenStep("I can’t find an interactive area for that element. Use the screen yourself.")
+                }
+                val needsConfirm = labels.any(SensitiveActions::needsConfirmation) || resources.any(SensitiveActions::needsConfirmation)
+                val targetLabel = labels.firstOrNull { SensitiveActions.canQuote(it, 40) }
+                    ?: labels.firstOrNull()?.filterNot { it.isISOControl() }?.trim()?.take(40)?.takeIf { it.isNotBlank() }
+                    ?: "that control"
+                Plan(
+                    request = request,
+                    id = request.id,
+                    action = if (clickTarget != null) AccessibilityNodeInfo.ACTION_CLICK else null,
+                    target = targetLabel,
+                    needsConfirm = needsConfirm,
+                    targetStamp = info,
+                )
             }
             is ScreenAction.Scroll -> {
                 val action = scrollAction(request.direction, request.page)
-                val id = request.id ?: screen.elements.keys.singleOrNull {
-                    screen.elements[it]?.let { node -> node.isEnabled && node.isScrollable } == true &&
-                        action in stamp(it).actions
+                if (request.id != null) {
+                    val node = target(request.id)
+                    val info = stamp(request.id)
+                    val resolvedAction = if (node.isScrollable && action in info.actions) action else null
+                    Plan(request, id = request.id, action = resolvedAction, targetStamp = info)
+                } else {
+                    val bestId = screen.elements.entries
+                        .filter { (id, node) -> node.isEnabled && node.isScrollable && action in stamp(id).actions }
+                        .maxByOrNull { (_, node) ->
+                            val r = Rect().also(node::getBoundsInScreen)
+                            r.width().toLong().coerceAtLeast(0L) * r.height().toLong().coerceAtLeast(0L)
+                        }?.key
+                    if (bestId != null) {
+                        Plan(request, id = bestId, action = action, targetStamp = stamp(bestId))
+                    } else {
+                        // Fall back to a foreground-window swipe gesture for Compose/WebView/launcher screens.
+                        Plan(request, id = null, action = null)
+                    }
                 }
-                if (id == null || !target(id).isScrollable || action !in stamp(id).actions) {
-                    throw ManualScreenStep("I can’t verify a scrollable control for that direction. Move the screen manually.")
-                }
-                Plan(request, id = id, action = action)
             }
             is ScreenAction.Read -> {
                 val node = target(request.id)
@@ -332,7 +451,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 if (node.isEditable || !SensitiveActions.canQuote(text, 500)) {
                     throw ManualScreenStep("I can’t verify text I can safely read from that element.")
                 }
-                Plan(request, id = request.id, payload = text)
+                Plan(request, id = request.id, payload = text, targetStamp = info)
             }
             is ScreenAction.Navigate -> Plan(request, action = globalAction(request.key))
             is ScreenAction.Open -> {
@@ -356,6 +475,88 @@ class JarvisAccessibilityService : AccessibilityService() {
             node.packageName?.toString() != window.packageName || ScreenReader.isProtectedNode(node) ||
             NodeStamp.of(node) != screen.stamps[id]) throw ManualScreenStep(CHANGED)
         return node
+    }
+
+    private fun findClickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo? = node
+        repeat(5) {
+            val candidate = cur ?: return null
+            if (candidate.isEnabled && candidate.isVisibleToUser && !ScreenReader.isProtectedNode(candidate) &&
+                (candidate.isClickable || candidate.isCheckable) &&
+                candidate.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }) {
+                return candidate
+            }
+            cur = candidate.parent
+        }
+        return null
+    }
+
+    private fun dispatchTapGesture(node: AccessibilityNodeInfo, windowBounds: Rect, cancelled: () -> Boolean): Boolean {
+        val rect = Rect().also(node::getBoundsInScreen)
+        if (!rect.intersect(windowBounds) || rect.isEmpty) return false
+        val path = Path().apply { moveTo(rect.exactCenterX(), rect.exactCenterY()) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, 50L))
+            .build()
+        return dispatchGestureSync(gesture, cancelled)
+    }
+
+    private fun dispatchSwipeGesture(
+        targetBounds: Rect,
+        windowBounds: Rect,
+        direction: Direction,
+        cancelled: () -> Boolean,
+    ): Boolean {
+        val rect = Rect(targetBounds)
+        if (!rect.intersect(windowBounds) || rect.width() < 40 || rect.height() < 40) {
+            rect.set(windowBounds)
+        }
+        if (rect.width() < 40 || rect.height() < 40) return false
+        val cx = rect.exactCenterX()
+        val cy = rect.exactCenterY()
+        val dx = rect.width() * 0.30f
+        val dy = rect.height() * 0.28f
+        val minX = (windowBounds.left + 24).toFloat()
+        val maxX = (windowBounds.right - 24).toFloat().coerceAtLeast(minX)
+        val minY = (windowBounds.top + 48).toFloat()
+        val maxY = (windowBounds.bottom - 48).toFloat().coerceAtLeast(minY)
+        val (sx, sy, ex, ey) = when (direction) {
+            Direction.DOWN -> listOf(cx, (cy + dy).coerceIn(minY, maxY), cx, (cy - dy).coerceIn(minY, maxY))
+            Direction.UP -> listOf(cx, (cy - dy).coerceIn(minY, maxY), cx, (cy + dy).coerceIn(minY, maxY))
+            Direction.RIGHT -> listOf((cx + dx).coerceIn(minX, maxX), cy, (cx - dx).coerceIn(minX, maxX), cy)
+            Direction.LEFT -> listOf((cx - dx).coerceIn(minX, maxX), cy, (cx + dx).coerceIn(minX, maxX), cy)
+        }
+        val path = Path().apply {
+            moveTo(sx, sy)
+            lineTo(ex, ey)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, 260L))
+            .build()
+        return dispatchGestureSync(gesture, cancelled)
+    }
+
+    private fun dispatchGestureSync(gesture: GestureDescription, cancelled: () -> Boolean): Boolean {
+        val done = CountDownLatch(1)
+        val completed = AtomicBoolean(false)
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                completed.set(true)
+                done.countDown()
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                completed.set(false)
+                done.countDown()
+            }
+        }, null)
+        if (!dispatched) return false
+        val deadline = SystemClock.elapsedRealtime() + 1_500
+        while (!done.await(50, TimeUnit.MILLISECONDS)) {
+            checkRunning(cancelled)
+            if (SystemClock.elapsedRealtime() >= deadline) return false
+        }
+        return completed.get()
     }
 
     private fun isDirectClick(node: AccessibilityNodeInfo, stamp: NodeStamp) =
@@ -410,17 +611,34 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
             is FastCommand.TapText -> {
                 val screen = observe(300, cancelled)
-                val ids = screen.stamps.filterValues {
-                    it.text.equals(cmd.text, true) || it.description.equals(cmd.text, true)
+                val exact = screen.stamps.filterValues {
+                    it.text.equals(cmd.text, true) || it.description.equals(cmd.text, true) || it.hint.equals(cmd.text, true)
                 }.keys
-                val id = ids.singleOrNull() ?: throw ManualScreenStep("There isn’t exactly one visible match for ${cmd.text}.")
-                val effect = perform(screen, 300, ScreenAction.Tap(id), Any(), cancelled, { null }, {})
+                val candidates = exact.ifEmpty {
+                    val partial = screen.stamps.filterValues {
+                        it.text?.contains(cmd.text, true) == true || it.description?.contains(cmd.text, true) == true
+                    }.keys
+                    if (partial.size > 1) {
+                        partial.filter { id -> screen.elements[id]?.let { findClickableAncestor(it) != null } == true }.ifEmpty { partial }
+                    } else partial
+                }
+                val id = candidates.singleOrNull()
+                    ?: throw ManualScreenStep(
+                        if (candidates.isEmpty()) "I couldn’t find ${cmd.text} on this screen."
+                        else "There is more than one match for ${cmd.text} on this screen."
+                    )
+                val effect = perform(
+                    screen, 300, ScreenAction.Tap(id), Any(), cancelled,
+                    ask = { q -> asker?.invoke(q) }, dispatching = {},
+                )
                 ScreenEffect(effect.summary, verified = true)
             }
             is FastCommand.TypeText -> {
                 val screen = observe(300, cancelled)
-                val target = screen.elements.keys.singleOrNull { screen.elements[it]?.isFocused == true }
-                    ?: throw ManualScreenStep("I can’t verify a focused text field.")
+                val target = screen.elements.keys.singleOrNull {
+                    screen.elements[it]?.let { n -> n.isFocused && n.isEditable } == true
+                } ?: screen.elements.keys.singleOrNull { screen.elements[it]?.isEditable == true }
+                    ?: throw ManualScreenStep("I couldn’t find an active text field to type into.")
                 perform(screen, 300, ScreenAction.Edit(target, cmd.text), Any(), cancelled, { null }, {}, explicitEdit = true)
             }
             FastCommand.ClearText -> {
@@ -566,6 +784,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     private fun interrupted(): Boolean = Thread.currentThread().isInterrupted
 
     companion object {
+        private const val TAG = "JarvisA11y"
         private const val CAPTURE_ALLOWED = 0
         private const val UNAVAILABLE = "I can’t verify that this screen is safe to control. Use the phone yourself."
         private const val CHANGED = "The screen changed before I could act. I stopped so nothing would go to the wrong place."

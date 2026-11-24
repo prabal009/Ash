@@ -8,6 +8,9 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import com.jarvis.assistant.accessibility.WindowContext
+import com.jarvis.assistant.agent.PhoneAgent
+import com.jarvis.assistant.agent.ToolCall
 import com.jarvis.assistant.audio.AudioEndpoint
 import com.jarvis.assistant.audio.AudioRouteListener
 import com.jarvis.assistant.audio.AudioSystemGateway
@@ -19,6 +22,7 @@ import com.jarvis.assistant.contacts.ContactEntry
 import com.jarvis.assistant.contacts.ContactMatch
 import com.jarvis.assistant.contacts.DirectCallPolicy
 import com.jarvis.assistant.contacts.PhoneNumber
+import com.jarvis.assistant.router.FastActionExecutor
 import com.jarvis.assistant.router.FastCommand
 import com.jarvis.assistant.router.MediaAction
 import com.jarvis.assistant.router.QueryKind
@@ -26,6 +30,7 @@ import com.jarvis.assistant.router.VolumeChange
 import com.jarvis.assistant.service.LockedCommands
 import com.jarvis.assistant.service.PendingUnlock
 import com.jarvis.assistant.service.TurnInputRoute
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -73,6 +78,60 @@ class EndToEndPhase7Test {
         assertFalse("emergency number must never auto-call", DirectCallPolicy.canPlaceDirectly(true, true, "call 112", exact, "112", 20_000L, Long.MIN_VALUE))
         assertFalse("duplicate cooldown blocks redial", DirectCallPolicy.canPlaceDirectly(true, true, "call rahul", exact, "+919876543210", 25_000L, 20_000L))
         assertTrue("allowed after cooldown expires", DirectCallPolicy.canPlaceDirectly(true, true, "call rahul", exact, "+919876543210", 31_000L, 20_000L))
+        val prefix = ContactMatch(listOf(rahul), "prefix")
+        assertTrue("unambiguous prefix match allowed in direct calling mode", DirectCallPolicy.canPlaceDirectly(true, true, "call rah", prefix, "+919876543210", 20_000L, Long.MIN_VALUE))
+    }
+
+    @Test
+    fun directDialPlacesCallOnSingleVoiceCommandWhenOptedInAndBlocksEmergency() {
+        val app = shadowOf(ApplicationProvider.getApplicationContext<Application>())
+        app.grantPermissions(Manifest.permission.CALL_PHONE)
+        val settings = Settings(ctx)
+        settings.directContactCalls = true
+        try {
+            val executor = FastActionExecutor(ctx, settings) { null }
+            var asked = false
+            val direct = executor.execute(
+                FastCommand.Dial("9876543210"),
+                recordStep = {},
+                asker = { asked = true; "yes" },
+                spokenRequest = "call 9876543210",
+                canAct = { true },
+            )
+            assertTrue(direct.message, direct.success)
+            assertTrue("direct call must be marked irreversible", direct.irreversible)
+            assertFalse("direct call must not prompt when opted in", asked)
+
+            val emergency = executor.execute(
+                FastCommand.Dial("112"),
+                recordStep = {},
+                asker = { asked = true; "no" },
+                spokenRequest = "call 112",
+                canAct = { true },
+            )
+            assertFalse("emergency number must never auto-call", emergency.success)
+            assertTrue("emergency number must still require explicit confirmation", asked)
+        } finally {
+            settings.directContactCalls = false
+        }
+    }
+
+    @Test
+    fun windowContextAndPhoneAgentSupportGestureSwipeWithoutWeakeningGuards() {
+        val base = WindowContext("com.example.app", 10, "0 0 1080 2400", "Home", epoch = 1L)
+        assertTrue("epoch ticks alone must not invalidate foreground window", base.sameWindow(base.copy(epoch = 99L)))
+        assertFalse("package change must invalidate foreground window", base.sameWindow(base.copy(packageName = "com.other.app")))
+        assertFalse("windowId change must invalidate foreground window", base.sameWindow(base.copy(windowId = 11)))
+        assertFalse("title change must invalidate foreground window", base.sameWindow(base.copy(title = "Sign in")))
+
+        assertNotNull(
+            "swipe without element_id allowed for gesture fallback",
+            PhoneAgent.parse(ToolCall("1", "swipe", JSONObject().put("observation_id", 2).put("direction", "down")), 2),
+        )
+        assertNull(
+            "raw coordinate tap_point remains rejected",
+            PhoneAgent.parse(ToolCall("2", "tap_point", JSONObject().put("observation_id", 2).put("x", 100).put("y", 200)), 2),
+        )
     }
 
     @Test

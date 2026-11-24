@@ -17,7 +17,7 @@ import android.telephony.TelephonyManager
  */
 object DirectCallPolicy {
     const val COOLDOWN_MS = 10_000L
-    private val HIGH_CONFIDENCE_TIERS = setOf("exact", "words", "kin")
+    private val HIGH_CONFIDENCE_TIERS = setOf("exact", "words", "kin", "prefix")
     private val KNOWN_EMERGENCY = setOf("112", "911", "999", "000", "100", "101", "102", "108", "110", "119", "181", "1091")
 
     fun isEmergencyOrSpecial(number: String, context: Context? = null): Boolean {
