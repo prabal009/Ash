@@ -56,6 +56,9 @@ object Llm {
     }
 
     fun newSession(config: ProviderConfig, system: String, tools: List<ToolSpec>): ChatSession = providerResult {
+        if (!config.preset.editableUrl && !config.preset.matchesFixedEndpoint(config.baseUrl)) {
+            throw ProviderFailure("Use the provider's official address or choose a custom provider.")
+        }
         if (config.preset.needsKey && config.apiKey.isBlank()) throw ProviderFailure("Enter an API key for this provider.")
         when (config.preset.kind) {
             ApiKind.ANTHROPIC -> AnthropicSession(config, system, tools)

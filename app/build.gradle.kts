@@ -100,22 +100,34 @@ val sherpaAar = file("libs/sherpa-onnx-$sherpaVersion.aar")
 val sherpaSha256 = "633c24321e06b1fe79feafa03ea16cbc0f8a286641e2da3559bac91bdb13bd96"
 
 val fetchSherpaOnnx by tasks.registering {
-    description = "Downloads the sherpa-onnx Android library from its GitHub releases."
+    description = "Fetches and verifies the pinned sherpa-onnx Android library."
+    inputs.property("sha256", sherpaSha256)
     outputs.file(sherpaAar)
-    onlyIf { !sherpaAar.exists() }
     doLast {
-        val url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$sherpaVersion/sherpa-onnx-$sherpaVersion.aar"
-        logger.lifecycle("Downloading $url")
-        val part = File(sherpaAar.path + ".part")
-        sherpaAar.parentFile.mkdirs()
-        URI(url).toURL().openStream().use { input -> part.outputStream().use { input.copyTo(it) } }
-        val digest = MessageDigest.getInstance("SHA-256").digest(part.readBytes())
-            .joinToString("") { "%02x".format(it) }
-        if (digest != sherpaSha256) {
-            part.delete()
-            throw GradleException("sherpa-onnx download is corrupt (sha256 $digest)")
+        val cached = sherpaAar.exists()
+        val source = if (cached) sherpaAar else File(sherpaAar.path + ".part")
+        try {
+            if (!cached) {
+                val url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$sherpaVersion/sherpa-onnx-$sherpaVersion.aar"
+                logger.lifecycle("Downloading $url")
+                sherpaAar.parentFile.mkdirs()
+                URI(url).toURL().openStream().use { input -> source.outputStream().use { input.copyTo(it) } }
+            }
+            val sha = MessageDigest.getInstance("SHA-256")
+            source.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n == -1) break
+                    sha.update(buffer, 0, n)
+                }
+            }
+            val actual = sha.digest().joinToString("") { "%02x".format(it) }
+            if (actual != sherpaSha256) throw GradleException("Unexpected sherpa-onnx SHA-256: $actual")
+            if (!cached && !source.renameTo(sherpaAar)) throw GradleException("Could not install sherpa-onnx AAR")
+        } finally {
+            if (!cached) source.delete()
         }
-        part.renameTo(sherpaAar)
     }
 }
 

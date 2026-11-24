@@ -11,7 +11,7 @@ import java.util.UUID
 /** The kind of wire API a provider speaks. */
 enum class ApiKind { ANTHROPIC, OPENAI_COMPATIBLE }
 
-/** A built-in provider preset. Every field except [kind] can be overridden by the user. */
+/** Cloud presets have fixed service addresses; only local and custom presets expose the endpoint. */
 data class ProviderPreset(
     val id: String,
     val label: String,
@@ -19,7 +19,12 @@ data class ProviderPreset(
     val defaultBaseUrl: String,
     val defaultModel: String,
     val needsKey: Boolean,
-)
+) {
+    val editableUrl get() = id == "custom" || id == "lmstudio" || id == "ollama"
+    val acceptsKey get() = needsKey || id == "custom"
+    fun endpoint(input: String) = if (editableUrl) input.trim().ifBlank { defaultBaseUrl } else defaultBaseUrl
+    fun matchesFixedEndpoint(input: String) = input.trim().trimEnd('/') == defaultBaseUrl.trimEnd('/')
+}
 
 val PROVIDERS = listOf(
     ProviderPreset("anthropic", "Claude (Anthropic)", ApiKind.ANTHROPIC, "https://api.anthropic.com", "claude-opus-5-5", true),
@@ -52,10 +57,13 @@ data class ModelProfile(
     override fun toString() = "ModelProfile(credentials redacted)"
 
     companion object {
-        fun fromJson(o: JSONObject, apiKey: String = "") = ModelProfile(
-            o.getString("id"), o.optString("name"), o.optString("provider", "custom"), o.optString("base"),
-            apiKey, o.optString("model"), o.optString("effort", "medium"),
-        )
+        fun fromJson(o: JSONObject, apiKey: String = ""): ModelProfile {
+            val preset = PROVIDERS.firstOrNull { it.id == o.optString("provider") } ?: PROVIDERS.last()
+            val base = o.optString("base").trim().ifBlank { preset.defaultBaseUrl }
+            val key = if (preset.acceptsKey) apiKey else ""
+            return ModelProfile(o.getString("id"), o.optString("name"), preset.id, base,
+                key, o.optString("model"), o.optString("effort", "medium"))
+        }
     }
 }
 
@@ -345,6 +353,11 @@ class Settings internal constructor(context: Context, private val credentials: P
         get() = prefs.getBoolean("headset_button_fallback", false)
         set(v) = prefs.edit().putBoolean("headset_button_fallback", v).apply()
 
+    /** Enabling this requires explicit consent in Settings; Android permission alone is not consent. */
+    var directContactCalls: Boolean
+        get() = prefs.getBoolean("direct_contact_calls", false)
+        set(v) = prefs.edit().putBoolean("direct_contact_calls", v).apply()
+
     // ---- Assistant behaviour ----
 
     /** AUTO, ONLINE or OFFLINE. Controls which model answers; simple phone actions never use a model. */
@@ -374,10 +387,8 @@ class Settings internal constructor(context: Context, private val credentials: P
         get() = prefs.getBoolean("local_autostart", true)
         set(v) = prefs.edit().putBoolean("local_autostart", v).apply()
 
-    /** Script installed by termux/install-termux.sh. Must be an absolute path inside Termux. */
-    var termuxScriptPath: String
-        get() = prefs.getString("termux_script", DEFAULT_TERMUX_SCRIPT) ?: DEFAULT_TERMUX_SCRIPT
-        set(v) = prefs.edit().putString("termux_script", v.ifBlank { DEFAULT_TERMUX_SCRIPT }).apply()
+    /** Older installs may have explicitly selected a Termux script. Resolve the default for the active user at launch. */
+    internal val termuxScriptOverride: String? get() = prefs.getString("termux_script", null)
 
     /** Local date (yyyy-MM-dd) of the last daily greeting. Kept across restarts so Jarvis greets once per day. */
     var lastGreetingDate: String?
@@ -432,7 +443,6 @@ class Settings internal constructor(context: Context, private val credentials: P
         set(v) = prefs.edit().putBoolean("model_download_mobile", v).apply()
 
     companion object {
-        const val DEFAULT_TERMUX_SCRIPT = "/data/data/com.termux/files/home/.jarvis/start-llama.sh"
         private const val RUNTIME_SLOT = "provider_secret.runtime"
         private val CREDENTIALS_LOCK = Any()
     }

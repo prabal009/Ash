@@ -3,6 +3,7 @@ package com.jarvis.assistant.ui
 import android.os.Bundle
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.jarvis.assistant.ApiKind
 import com.jarvis.assistant.ModelProfile
@@ -58,6 +59,10 @@ class ModelEditActivity : AppCompatActivity() {
         }
         ui.providerChips.select(preset.id)
         showFieldsFor(preset)
+        ui.baseUrl.doAfterTextChanged {
+            // An edited destination is a new credential boundary, even within the same custom preset.
+            if (preset.editableUrl) ui.apiKey.text?.clear()
+        }
 
         ui.providerChips.setOnCheckedStateChangeListener { _, _ ->
             val next = PROVIDERS.firstOrNull { it.id == ui.providerChips.selectedTag } ?: return@setOnCheckedStateChangeListener
@@ -69,19 +74,21 @@ class ModelEditActivity : AppCompatActivity() {
         }
     }
 
-    /** Fill in the new provider's defaults, but keep anything the user typed themselves. */
+    /** Keep a custom display name/model, never the previous provider's endpoint or credential. */
     private fun applyPresetDefaults(next: ProviderPreset, previous: ProviderPreset?) {
         fun untouched(current: String, oldDefault: String?) = current.isBlank() || current == oldDefault
         if (untouched(ui.name.text.toString(), previous?.label?.substringBefore(" ("))) ui.name.setText(next.label.substringBefore(" ("))
         if (untouched(ui.model.text.toString(), previous?.defaultModel)) ui.model.setText(next.defaultModel)
-        if (untouched(ui.baseUrl.text.toString(), previous?.defaultBaseUrl)) ui.baseUrl.setText(next.defaultBaseUrl)
+        ui.apiKey.text?.clear()
+        ui.apiKeyLayout.error = null
+        ui.baseUrl.setText(next.defaultBaseUrl)
     }
 
     private fun showFieldsFor(p: ProviderPreset) {
-        val local = p.id in setOf("lmstudio", "ollama", "custom")
+        val local = p.editableUrl
         // Cloud providers have a fixed address, so only local/custom servers show it.
         ui.baseUrlLayout.visibility = if (local) View.VISIBLE else View.GONE
-        ui.apiKeyLayout.visibility = if (p.needsKey || p.id == "custom") View.VISIBLE else View.GONE
+        ui.apiKeyLayout.visibility = if (p.acceptsKey) View.VISIBLE else View.GONE
         ui.apiKeyLayout.hint = getString(if (p.needsKey) R.string.api_key else R.string.api_key_optional)
         ui.effortSection.visibility = if (p.kind == ApiKind.ANTHROPIC) View.VISIBLE else View.GONE
         ui.providerHint.text = HINTS[p.id]?.let(::getString).orEmpty()
@@ -90,7 +97,7 @@ class ModelEditActivity : AppCompatActivity() {
     private fun current(): ModelProfile? {
         ui.apiKeyLayout.error = null
         ui.name.error = null
-        val key = ui.apiKey.text.toString().trim()
+        val key = if (preset.acceptsKey) ui.apiKey.text.toString().trim() else ""
         val model = ui.model.text.toString().trim()
         if (preset.needsKey && key.isBlank()) { ui.apiKeyLayout.error = getString(R.string.paste_api_key); return null }
         if (model.isBlank()) { ui.model.error = getString(R.string.enter_model_id); return null }
@@ -98,7 +105,7 @@ class ModelEditActivity : AppCompatActivity() {
             id = existing?.id ?: java.util.UUID.randomUUID().toString(),
             name = ui.name.text.toString().trim().ifBlank { preset.label.substringBefore(" (") },
             providerId = preset.id,
-            baseUrl = ui.baseUrl.text.toString().trim().ifBlank { preset.defaultBaseUrl },
+            baseUrl = preset.endpoint(ui.baseUrl.text.toString()),
             apiKey = key,
             model = model,
             effort = ui.effortChips.selectedTag ?: "medium",

@@ -23,6 +23,8 @@ import android.provider.MediaStore
 import android.telecom.TelecomManager
 import android.util.Log
 import android.view.KeyEvent
+import android.Manifest
+import android.os.Bundle
 import com.jarvis.assistant.Settings
 import com.jarvis.assistant.accessibility.JarvisAccessibilityService
 import com.jarvis.assistant.agent.SensitiveActions
@@ -32,10 +34,12 @@ import com.jarvis.assistant.contacts.ContactMatcher
 import com.jarvis.assistant.contacts.ContactResolver
 import com.jarvis.assistant.contacts.PermissionActivity
 import com.jarvis.assistant.contacts.PhoneNumber
+import com.jarvis.assistant.contacts.DirectCallPolicy
 import com.jarvis.assistant.media.MediaNotificationListener
 import com.jarvis.assistant.memory.MemoryStore
 import com.jarvis.assistant.memory.SensitiveFilter
 import com.jarvis.assistant.runtime.EmbeddedRuntime
+import com.jarvis.assistant.service.LockedCommands
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -74,13 +78,8 @@ class FastActionExecutor(
 
     @Volatile private var appCache: Pair<Long, List<AppEntry>>? = null
 
-    @Volatile private var torchOn = false
-    @Volatile private var torchWatching = false
-    private val torchCallback = object : CameraManager.TorchCallback() {
-        override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
-            torchOn = enabled
-        }
-    }
+    // A resource is reserved before dispatch, including when Android returns an uncertain error.
+    private var lastDirectAttempt = Long.MIN_VALUE
 
     private val resolver by lazy { ContactResolver(app) }
 
@@ -98,13 +97,12 @@ class FastActionExecutor(
         cmd: FastCommand,
         recordStep: (String) -> Unit,
         asker: ((String) -> String?)?,
+        spokenRequest: String? = null,
         canAct: () -> Boolean,
     ): Result = try {
-        val allowedWhileLocked = cmd is FastCommand.Media && cmd.app == null ||
-            cmd is FastCommand.Ask && cmd.kind == QueryKind.TIME
-        val check = { checkAuthorized(canAct, allowedWhileLocked) }
+        val check = { checkAuthorized(canAct, LockedCommands.allows(cmd)) }
         check()
-        run(cmd, recordStep, asker, check)
+        run(cmd, recordStep, asker, check, spokenRequest)
     } catch (e: ActionBlocked) {
         Result(true, false, e.message.orEmpty())
     } catch (_: InterruptedException) {
@@ -123,42 +121,51 @@ class FastActionExecutor(
         recordStep: (String) -> Unit,
         asker: ((String) -> String?)?,
         check: () -> Unit,
+        spokenRequest: String?,
     ): Result = when (cmd) {
         is FastCommand.OpenApp -> openApp(cmd.query, asker, check)
         is FastCommand.Press -> press(cmd.key, check)
-        is FastCommand.Scroll -> withPhoneControl(check) { svc ->
-            val msg = svc.scroll(null, cmd.direction)
-            Result(true, !msg.contains("failed"), if (msg.contains("failed")) "I couldn't scroll." else "Scrolled ${cmd.direction}.")
+        is FastCommand.Scroll, FastCommand.ClearText, FastCommand.SubmitSearch, is FastCommand.TypeText,
+        is FastCommand.TapText -> withPhoneControl(check) { svc ->
+            val effect = svc.userControl(cmd, asker, check)
+            Result(true, effect.verified, effect.summary)
+        }
+        is FastCommand.YouTubeSearch -> {
+            val svc = a11y
+            if (svc != null) {
+                check()
+                val effect = svc.userControl(cmd, asker, check)
+                Result(true, effect.verified, effect.summary)
+            } else {
+                webSearch(FastCommand.WebSearch(cmd.query, "youtube"), check)
+            }
         }
         is FastCommand.Volume -> volume(cmd, check)
         is FastCommand.Flashlight -> flashlight(cmd, check)
         is FastCommand.Media -> media(cmd, asker, check)
         is FastCommand.PlayMusic -> playMusic(cmd, asker, check)
         is FastCommand.WebSearch -> webSearch(cmd, check)
+        is FastCommand.OpenWebsite -> {
+            val intent = cmd.browserIntent()
+            val sent = intent != null && startIntent(intent, check)
+            Result(true, sent, if (sent) "I asked Android to open the website." else "I couldn't open that website.")
+        }
         is FastCommand.OpenSettings -> openSettings(cmd, check)
         FastCommand.OpenCamera -> {
             val ok = startIntent(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA), check)
-            Result(true, ok, if (ok) "Opening the camera." else "I couldn't open the camera.")
+            Result(true, ok, if (ok) "I asked Android to open the camera." else "I couldn't open the camera.")
         }
         is FastCommand.SetAlarm -> setAlarm(cmd, check)
         is FastCommand.SetTimer -> setTimer(cmd, check)
         is FastCommand.Dial -> confirmDial(cmd.number, null, asker, recordStep, check)
-        is FastCommand.CallContact -> callContact(cmd.name, asker, recordStep, check)
-        is FastCommand.TapText -> withPhoneControl(check) { svc ->
-            val msg = svc.tapByText(cmd.text)
-            Result(true, msg.startsWith("Tapped"), msg)
-        }
-        is FastCommand.TypeText -> withPhoneControl(check) { svc ->
-            val msg = try { svc.typeText(null, cmd.text, false) } catch (e: IllegalStateException) { e.message ?: "No text field is focused." }
-            Result(true, msg.startsWith("Typed"), if (msg.startsWith("Typed")) "Typed it." else msg)
-        }
+        is FastCommand.CallContact -> callContact(cmd.name, spokenRequest, asker, recordStep, check)
         FastCommand.Screenshot -> withPhoneControl(check) { svc ->
             val msg = svc.pressKey("screenshot")
-            Result(true, msg.startsWith("Pressed"), if (msg.startsWith("Pressed")) "Taking a screenshot." else "I couldn't take a screenshot.")
+            Result(true, msg.startsWith("Pressed"), if (msg.startsWith("Pressed")) "Android accepted the screenshot request." else msg)
         }
         FastCommand.LockScreen -> withPhoneControl(check) { svc ->
             val msg = svc.pressKey("lock")
-            Result(true, msg.startsWith("Pressed"), if (msg.startsWith("Pressed")) "Locking the screen." else "I couldn't lock the screen.")
+            Result(true, msg.startsWith("Pressed"), if (msg.startsWith("Pressed")) "Android accepted the screen lock request." else msg)
         }
         is FastCommand.Ask -> ask(cmd.kind)
         is FastCommand.SetMode -> setMode(cmd.mode, check)
@@ -192,11 +199,12 @@ class FastActionExecutor(
             return Result(false, false, "")
         }
         // A match that only "sounds like" the name is confirmed first. A yes teaches Jarvis the name for next time.
-        if (m.how == "sound" && asker != null) {
+        if (m.how == "sound") {
+            if (asker == null) return Result(true, false, "Please say the full app name.")
             check()
             val answer = asker("Did you mean ${entry.label}?")
             check()
-            if (!SensitiveActions.isYes(answer)) return Result(true, true, "Okay, I won't open it.")
+            if (!SensitiveActions.isYes(answer)) return Result(true, false, "Okay, I won't open it.")
             learnAlias(query, entry)
         }
         val svc = a11y
@@ -221,15 +229,7 @@ class FastActionExecutor(
     private fun press(key: String, check: () -> Unit): Result = withPhoneControl(check) { svc ->
         val msg = svc.pressKey(key)
         val ok = msg.startsWith("Pressed")
-        val say = when (key) {
-            "back" -> "Going back."
-            "home" -> "Home."
-            "recents" -> "Recent apps."
-            "notifications" -> "Notifications."
-            "quick_settings" -> "Quick settings."
-            else -> "Done."
-        }
-        Result(true, ok, if (ok) say else "I couldn't do that.")
+        Result(true, ok, if (ok) "Android accepted the ${key.replace('_', ' ')} request." else msg)
     }
 
     private inline fun withPhoneControl(check: () -> Unit, block: (JarvisAccessibilityService) -> Result): Result {
@@ -266,17 +266,28 @@ class FastActionExecutor(
             c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true &&
                 c.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
         } ?: return Result(true, false, "This phone has no flashlight I can use.")
-        if (!torchWatching) {
-            cm.registerTorchCallback(torchCallback, Handler(Looper.getMainLooper()))
-            torchWatching = true
-            Thread.sleep(200) // the callback reports the current state shortly after registering
+        // Callbacks are per camera. An unknown initial state (or another camera's callback)
+        // cannot confirm "off", and we must not guess the direction of a toggle.
+        val state = java.util.concurrent.atomic.AtomicReference<Boolean?>()
+        val callback = object : CameraManager.TorchCallback() {
+            override fun onTorchModeChanged(id: String, enabled: Boolean) {
+                if (id == cameraId) state.set(enabled)
+            }
+            override fun onTorchModeUnavailable(id: String) {
+                if (id == cameraId) state.set(null)
+            }
         }
-        val want = cmd.on ?: !torchOn
-        check()
-        cm.setTorchMode(cameraId, want)
-        waitUntil(800) { torchOn == want }
-        return if (torchOn == want) Result(true, true, if (want) "Flashlight on." else "Flashlight off.")
-        else Result(true, false, "I couldn't turn the flashlight ${if (want) "on" else "off"}.")
+        cm.registerTorchCallback(callback, Handler(Looper.getMainLooper()))
+        try {
+            waitUntil(800) { state.get() != null }
+            val want = cmd.on ?: state.get()?.not() ?: return Result(true, false, "I couldn't determine the flashlight state.")
+            check()
+            if (state.get() != want) cm.setTorchMode(cameraId, want)
+            return if (waitUntil(800) { state.get() == want }) Result(true, true, if (want) "Flashlight on." else "Flashlight off.")
+                else Result(true, false, "I couldn't verify that the flashlight turned ${if (want) "on" else "off"}.")
+        } finally {
+            cm.unregisterTorchCallback(callback)
+        }
     }
 
     private fun media(cmd: FastCommand.Media, asker: ((String) -> String?)?, check: () -> Unit): Result {
@@ -435,7 +446,7 @@ class FastActionExecutor(
         val url = if (youtube) "https://www.youtube.com/results?search_query=$q" else "https://www.google.com/search?q=$q"
         val ok = startIntent(Intent(Intent.ACTION_VIEW, Uri.parse(url)), check)
         val where = if (youtube) "YouTube" else "Google"
-        return Result(true, ok, if (ok) "Searching $where for ${cmd.query}." else "I couldn't start the search.")
+        return Result(true, ok, if (ok) "I sent the search request to $where." else "I couldn't start the search.")
     }
 
     private fun openSettings(cmd: FastCommand.OpenSettings, check: () -> Unit): Result {
@@ -457,12 +468,14 @@ class FastActionExecutor(
             "notification" -> "android.settings.ALL_APPS_NOTIFICATION_SETTINGS"
             else -> AndroidSettings.ACTION_SETTINGS
         }
-        val ok = startIntent(Intent(action), check) || startIntent(Intent(AndroidSettings.ACTION_SETTINGS), check)
+        val sent = startIntent(Intent(action), check)
+        val general = !sent && action != AndroidSettings.ACTION_SETTINGS && startIntent(Intent(AndroidSettings.ACTION_SETTINGS), check)
         val name = cmd.page.replaceFirstChar { it.uppercase() }
         return when {
-            !ok -> Result(true, false, "I couldn't open settings.")
-            cmd.toggleRequested -> Result(true, true, "Android doesn't let apps switch $name directly, so I opened its settings.")
-            else -> Result(true, true, "Opening $name settings.")
+            general -> Result(true, true, "I requested general Android settings. I couldn't open the $name page.")
+            !sent -> Result(true, false, "I couldn't open settings.")
+            cmd.toggleRequested -> Result(true, true, "I requested $name settings. Change the setting there.")
+            else -> Result(true, true, "I requested $name settings.")
         }
     }
 
@@ -537,6 +550,7 @@ class FastActionExecutor(
 
     private fun callContact(
         name: String,
+        spokenRequest: String?,
         asker: ((String) -> String?)?,
         recordStep: (String) -> Unit,
         check: () -> Unit,
@@ -548,6 +562,7 @@ class FastActionExecutor(
         }
         val match = ContactMatcher.find(name, resolver.contacts())
         check()
+        var clarified = false
         val contact: ContactEntry = when {
             match.matches.isEmpty() -> return Result(true, false, "I couldn't find that contact.")
             match.ambiguous -> {
@@ -561,8 +576,9 @@ class FastActionExecutor(
                 check()
                 val answer = asker("Which contact? ${numbered(labels)}")
                 check()
+                clarified = true
                 ContactMatcher.pick(answer.orEmpty(), match.matches)
-                    ?: return Result(true, false, "I couldn't identify the contact, so I didn't open the dialer.")
+                    ?: return Result(true, false, "I couldn't identify the contact, so I didn't place a call.")
             }
             else -> match.matches.single()
         }
@@ -575,11 +591,76 @@ class FastActionExecutor(
                 check()
                 val answer = asker("Which number for ${contact.name}? ${numbered(numbers.map(::describeNumber))}")
                 check()
+                clarified = true
                 ContactMatcher.pickNumber(answer, numbers)
-                    ?: return Result(true, false, "I couldn't identify the number, so I didn't open the dialer.")
+                    ?: return Result(true, false, "I couldn't identify the number, so I didn't place a call.")
             }
         }
-        return confirmDial(number.number, contact, asker, recordStep, check, number.type)
+        val dialable = ContactMatcher.dialableNumber(number.number)
+            ?: return Result(true, false, "I can't call that number. Enter it in the Phone app.")
+        val now = SystemClock.elapsedRealtime()
+        val allowDirect = if (clarified) {
+            DirectCallPolicy.canPlaceAfterClarification(
+                directEnabled = settings.directContactCalls,
+                hasCallPermission = resolver.hasCallPermission(),
+                spokenRequest = spokenRequest,
+                number = dialable,
+                nowMs = now,
+                lastAttemptMs = lastDirectAttempt,
+                context = app,
+            )
+        } else {
+            DirectCallPolicy.canPlaceDirectly(
+                directEnabled = settings.directContactCalls,
+                hasCallPermission = resolver.hasCallPermission(),
+                spokenRequest = spokenRequest,
+                match = match,
+                number = dialable,
+                nowMs = now,
+                lastAttemptMs = lastDirectAttempt,
+                context = app,
+            )
+        }
+        if (allowDirect) {
+            return placeDirectCall(contact, dialable, recordStep, check)
+        }
+        return confirmDial(dialable, contact, asker, recordStep, check, number.type)
+    }
+
+    private fun placeDirectCall(
+        contact: ContactEntry,
+        number: String,
+        recordStep: (String) -> Unit,
+        check: () -> Unit,
+    ): Result {
+        if (!resolver.stillHasNumber(contact, number)) {
+            return Result(true, false, "The contact or number is no longer available. Please ask again.")
+        }
+        check()
+        // Reserve cooldown BEFORE dispatch so an uncertain platform failure never redials.
+        lastDirectAttempt = SystemClock.elapsedRealtime()
+        recordStep("Requested direct call to ${contact.name}.")
+        val uri = Uri.fromParts("tel", number, null)
+        val placed = try {
+            val telecom = app.getSystemService(TelecomManager::class.java)
+            if (telecom != null) {
+                telecom.placeCall(uri, Bundle())
+                true
+            } else {
+                startIntent(Intent(Intent.ACTION_CALL, uri), check, direct = true)
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Direct call permission denied (${e.javaClass.simpleName})")
+            false
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Direct call failed (${e.javaClass.simpleName})")
+            false
+        }
+        return if (placed) {
+            Result(true, true, "Calling ${contact.name}.", irreversible = true)
+        } else {
+            Result(true, false, "Android didn't start the call to ${contact.name}. Check Phone permission or use the Phone app.")
+        }
     }
 
     private fun describeNumber(number: PhoneNumber): String =
@@ -630,7 +711,8 @@ class FastActionExecutor(
         QueryKind.BATTERY -> {
             val bm = app.getSystemService(BatteryManager::class.java)
             val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            Result(true, true, "Battery is at $level percent${if (bm.isCharging) " and charging" else ""}.")
+            if (level !in 0..100) Result(true, false, "Android didn't report a battery level.")
+            else Result(true, true, "Battery is at $level percent${if (bm.isCharging) " and charging" else ""}.")
         }
     }
 
@@ -656,7 +738,7 @@ class FastActionExecutor(
                 else -> {
                     check()
                     rt.startDownloadIfNeeded(allowMobileData = true) // the user asked for it explicitly
-                    Result(true, true, "Starting the download of the on-device model, about 1 gigabyte. I'll tell you when it's ready.")
+                    Result(true, true, "I requested the on-device model download. Check progress in Settings.")
                 }
             }
             RuntimeAction.STATUS -> Result(true, true, when (s.phase) {

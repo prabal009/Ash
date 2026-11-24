@@ -45,6 +45,17 @@ class ModelDownloaderTest {
     }
 
     @Test
+    fun interruptedSwapRestoresLastGoodModelEvenWhenNewArchiveCannotOpen() {
+        val target = File(tmp.root, "kws")
+        val previous = File(tmp.root, "kws.previous").apply { mkdir() }
+        previous.resolve("tokens.txt").writeText("last good vocabulary")
+        val corrupt = tmp.newFile("truncated").apply { writeText("incomplete") }
+        assertTrue(runCatching { ModelDownloader.unpack(corrupt, target, ModelDownloader::openTarBz2) }.isFailure)
+        assertEquals("last good vocabulary", target.resolve("tokens.txt").readText())
+        assertFalse(previous.exists())
+    }
+
+    @Test
     fun rejectsPathTraversal() {
         val archive = tarBz2("top/../../evil.txt" to "x")
         val target = File(tmp.root, "kokoro").apply { mkdirs(); resolve("keep.txt").writeText("keep") }

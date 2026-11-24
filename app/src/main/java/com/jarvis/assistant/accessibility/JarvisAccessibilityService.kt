@@ -2,8 +2,10 @@ package com.jarvis.assistant.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.app.KeyguardManager
+import android.app.SearchManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
@@ -19,6 +21,8 @@ import com.jarvis.assistant.apps.ScreenItem
 import com.jarvis.assistant.apps.YouTubeAction
 import com.jarvis.assistant.router.AppEntry
 import com.jarvis.assistant.router.AppMatcher
+import com.jarvis.assistant.router.FastCommand
+import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -384,6 +388,96 @@ class JarvisAccessibilityService : AccessibilityService() {
             Direction.LEFT -> if (usePage) AccessibilityAction.ACTION_PAGE_LEFT.id else AccessibilityAction.ACTION_SCROLL_LEFT.id
             Direction.RIGHT -> if (usePage) AccessibilityAction.ACTION_PAGE_RIGHT.id else AccessibilityAction.ACTION_SCROLL_RIGHT.id
         }
+    }
+
+    /** Direct user voice screen-control actions routed through the same live node & security checks. */
+    internal fun userControl(
+        cmd: FastCommand,
+        asker: ((String) -> String?)?,
+        check: () -> Unit,
+    ): ScreenEffect = try {
+        check()
+        val cancelled = {
+            if (interrupted()) true else try { check(); false } catch (_: RuntimeException) { true }
+        }
+        when (cmd) {
+            is FastCommand.Scroll -> {
+                val dir = Direction.entries.singleOrNull { it.name.equals(cmd.direction, true) }
+                    ?: throw ManualScreenStep(UNAVAILABLE)
+                val screen = observe(300, cancelled)
+                val effect = perform(screen, 300, ScreenAction.Scroll(null, dir, page = cmd.page), Any(), cancelled, { null }, {})
+                ScreenEffect(effect.summary, verified = true)
+            }
+            is FastCommand.TapText -> {
+                val screen = observe(300, cancelled)
+                val ids = screen.stamps.filterValues {
+                    it.text.equals(cmd.text, true) || it.description.equals(cmd.text, true)
+                }.keys
+                val id = ids.singleOrNull() ?: throw ManualScreenStep("There isn’t exactly one visible match for ${cmd.text}.")
+                val effect = perform(screen, 300, ScreenAction.Tap(id), Any(), cancelled, { null }, {})
+                ScreenEffect(effect.summary, verified = true)
+            }
+            is FastCommand.TypeText -> {
+                val screen = observe(300, cancelled)
+                val target = screen.elements.keys.singleOrNull { screen.elements[it]?.isFocused == true }
+                    ?: throw ManualScreenStep("I can’t verify a focused text field.")
+                perform(screen, 300, ScreenAction.Edit(target, cmd.text), Any(), cancelled, { null }, {}, explicitEdit = true)
+            }
+            FastCommand.ClearText -> {
+                val screen = observe(300, cancelled)
+                val target = screen.elements.keys.singleOrNull { screen.elements[it]?.isFocused == true }
+                    ?: throw ManualScreenStep("I can’t verify a focused text field to clear.")
+                val node = refreshTarget(screen, target)
+                val stamp = screen.stamps[target] ?: throw ManualScreenStep(CHANGED)
+                if (!node.isEditable || AccessibilityNodeInfo.ACTION_SET_TEXT !in stamp.actions || ScreenReader.isProtectedNode(node)) {
+                    throw ManualScreenStep("I can’t safely clear that field.")
+                }
+                check()
+                val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "") }
+                if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                    throw ManualScreenStep("Android didn’t confirm clearing the text field.")
+                }
+                val verified = node.refresh() && node.text.isNullOrEmpty()
+                ScreenEffect(
+                    if (verified) "Cleared the text field." else "Requested clearing the text field, but couldn't verify it.",
+                    verified = verified,
+                )
+            }
+            FastCommand.SubmitSearch -> {
+                val screen = observe(300, cancelled)
+                val buttonId = screen.stamps.entries.singleOrNull { (id, info) ->
+                    val node = screen.elements[id]
+                    node != null && node.isEnabled && isDirectClick(node, info) && hasOnlySearchLabel(info)
+                }?.key ?: throw ManualScreenStep("I couldn’t find a unique Search button on this screen.")
+                val fieldId = screen.stamps.entries.singleOrNull { (id, info) ->
+                    val node = screen.elements[id]
+                    node != null && node.isEditable && !node.isShowingHintText &&
+                        listOfNotNull(info.hint, info.description).any(SensitiveActions::isSearchLabel)
+                }?.key ?: throw ManualScreenStep("I couldn’t verify the search field for that button.")
+                val effect = perform(
+                    screen, 300, ScreenAction.Search(buttonId, fieldId), Any(), cancelled,
+                    ask = { q -> asker?.invoke(q) }, dispatching = {},
+                )
+                ScreenEffect(effect.summary, verified = true)
+            }
+            is FastCommand.YouTubeSearch -> {
+                val searchIntent = Intent(Intent.ACTION_SEARCH)
+                    .setPackage(YouTubeAction.packageName)
+                    .putExtra(SearchManager.QUERY, cmd.query)
+                val encoded = URLEncoder.encode(cmd.query, "UTF-8")
+                val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=$encoded"))
+                val sent = launch(searchIntent) || launch(fallbackIntent)
+                if (!sent) throw ManualScreenStep("I couldn’t open YouTube search.")
+                val shown = waitForForeground(YouTubeAction.packageName, 3_000, cancelled)
+                ScreenEffect(
+                    if (shown) "Opened YouTube search for ${cmd.query}." else "I asked Android to search YouTube for ${cmd.query}.",
+                    verified = shown,
+                )
+            }
+            else -> throw ManualScreenStep(UNAVAILABLE)
+        }
+    } catch (e: ManualScreenStep) {
+        ScreenEffect(e.message.orEmpty(), verified = false)
     }
 
     /** Legacy fast paths have a real user request, but still go through the same live node gate. */

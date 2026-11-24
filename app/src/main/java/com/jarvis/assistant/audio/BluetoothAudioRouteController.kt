@@ -29,7 +29,7 @@ import android.util.Log
  *     first on API 31+, then Classic HFP/SCO (`TYPE_BLUETOOTH_SCO`), with bounded timeout and automatic
  *     teardown + verified fallback to wired or phone mic on refusal, timeout, A2DP-only headset, or
  *     missing `BLUETOOTH_CONNECT` permission.
- * - Speech playback (`SPEECH_PLAYBACK`): tears down turn-only Classic SCO before hi-fi reply output,
+ * - Speech playback (`SPEECH_PLAYBACK`): tears down turn-only SCO or BLE communication before reply output,
  *   routes to active Bluetooth A2DP / BLE Audio / wired / USB / speaker, and stops private output if
  *   the headset disappears mid-reply.
  */
@@ -155,16 +155,6 @@ class BluetoothAudioRouteController(
             }
         }
 
-        @Suppress("DEPRECATION")
-        override fun onLegacyScoStateChanged(state: Int) {
-            val neg = pendingNegotiation ?: return
-            if (neg.generation != routeGeneration || neg.settled) return
-            when (state) {
-                AudioManager.SCO_AUDIO_STATE_CONNECTED -> completeNegotiation(neg)
-                AudioManager.SCO_AUDIO_STATE_ERROR -> failNegotiationAndFallback(RouteDisconnectReason.ROUTE_UNAVAILABLE)
-            }
-        }
-
         override fun onBluetoothAdapterDisabled() {
             val hadBtOutput = activeOutputPolicy.privateOutput &&
                 (activeOutputPolicy.expectedKind == OutputRouteKind.BLUETOOTH_A2DP ||
@@ -228,8 +218,8 @@ class BluetoothAudioRouteController(
         val inputs = gateway.getInputEndpoints()
         val outputs = gateway.getOutputEndpoints()
         val hasPerm = gateway.hasBluetoothConnectPermission()
-        val btConnected = hasPerm && outputs.any { isBluetoothOutputType(it.type) }
-        val btMicAvailable = hasPerm && bluetoothMicEnabled && findPreferredBluetoothCommEndpoint(inputs) != null
+        val btConnected = hasPerm && outputs.any { isBluetoothType(it.type) }
+        val btMicAvailable = hasPerm && bluetoothMicEnabled && findPreferredBluetoothCommEndpoint(inputs, outputs) != null
         val inputKind = activeInputPolicy.expectedKind
         val outputKind = selectCurrentOutputPolicy().expectedKind
         val label = when (inputKind) {
@@ -266,6 +256,8 @@ class BluetoothAudioRouteController(
         onReady: (policy: InputRoutePolicy, usedFallback: Boolean) -> Unit,
     ) {
         cancelPendingOutput()
+        // A new request replaces any earlier negotiation, including when the new turn uses the phone.
+        if (communicationOwned) releaseSessionInternal(clearMode = true)
         // If phone/VoIP call is active, never fight Android's audio mode.
         if (isExternalCallActive()) {
             val fallback = selectNonBluetoothInputPolicy().also { activeInputPolicy = it }
@@ -286,11 +278,12 @@ class BluetoothAudioRouteController(
         }
 
         val inputs = gateway.getInputEndpoints()
-        val btCandidate = findPreferredBluetoothCommEndpoint(inputs)
+        val outputs = gateway.getOutputEndpoints()
+        val btCandidate = findPreferredBluetoothCommEndpoint(inputs, outputs)
         if (btCandidate == null) {
             // Either no BT headset is connected, or it's A2DP-only without a microphone.
             val fallback = selectNonBluetoothInputPolicy().also { activeInputPolicy = it }
-            val a2dpOnly = gateway.getOutputEndpoints().any { isBluetoothOutputType(it.type) }
+            val a2dpOnly = outputs.any { isBluetoothType(it.type) }
             onReady(fallback, a2dpOnly)
             return
         }
@@ -323,9 +316,9 @@ class BluetoothAudioRouteController(
 
     override fun prepareOutputForSpeech(onReady: (OutputRoutePolicy) -> Unit) {
         cancelPendingOutput()
-        val needsScoTeardown = communicationOwned && activeCommunicationKind == InputRouteKind.BLUETOOTH_SCO
-        if (needsScoTeardown) {
-            // Release turn-only narrowband SCO before TTS so reply plays over hi-fi A2DP.
+        if (communicationOwned) {
+            // Both routes are turn-scoped; only Classic needs to settle back to A2DP.
+            val waitForA2dp = activeCommunicationKind == InputRouteKind.BLUETOOTH_SCO
             releaseSessionInternal(clearMode = true)
             val gen = routeGeneration
             val deliver = Runnable {
@@ -334,7 +327,7 @@ class BluetoothAudioRouteController(
                 val policy = selectCurrentOutputPolicy().also { activeOutputPolicy = it }
                 onReady(policy)
             }
-            if (teardownSettleMs <= 0L) {
+            if (!waitForA2dp || teardownSettleMs <= 0L) {
                 deliver.run()
             } else {
                 pendingOutputReady = deliver
@@ -360,7 +353,6 @@ class BluetoothAudioRouteController(
         timeoutMs: Long,
         onReady: (InputRoutePolicy, Boolean) -> Unit,
     ) {
-        abortPendingNegotiation()
         cancelTeardownGrace()
         expectingTeardown = false
         val gen = ++routeGeneration
@@ -394,7 +386,17 @@ class BluetoothAudioRouteController(
                 failNegotiationAndFallback(RouteDisconnectReason.ROUTE_UNAVAILABLE)
                 return
             }
-            gateway.registerLegacyScoReceiver(observer)
+            gateway.registerLegacyScoReceiver(object : AudioSystemObserver {
+                @Suppress("DEPRECATION")
+                override fun onLegacyScoStateChanged(state: Int) {
+                    if (pendingNegotiation !== negotiation) return
+                    when (state) {
+                        AudioManager.SCO_AUDIO_STATE_CONNECTED -> completeNegotiation(negotiation)
+                        AudioManager.SCO_AUDIO_STATE_ERROR ->
+                            failNegotiationAndFallback(RouteDisconnectReason.ROUTE_UNAVAILABLE)
+                    }
+                }
+            })
             gateway.startLegacyBluetoothSco()
         }
     }
@@ -415,6 +417,9 @@ class BluetoothAudioRouteController(
 
     private fun completeNegotiation(neg: Negotiation) {
         if (neg.settled || pendingNegotiation !== neg || neg.generation != routeGeneration) return
+        if (gateway.sdkInt >= Build.VERSION_CODES.S &&
+            gateway.getActiveCommunicationEndpoint()?.id != neg.targetEndpoint?.id
+        ) return // Switched away during settle; keep waiting for the requested device or timeout.
         neg.settled = true
         neg.timeoutTask?.let(main::removeCallbacks)
         neg.settleTask?.let(main::removeCallbacks)
@@ -437,6 +442,7 @@ class BluetoothAudioRouteController(
         neg.settled = true
         neg.timeoutTask?.let(main::removeCallbacks)
         neg.settleTask?.let(main::removeCallbacks)
+        gateway.unregisterLegacyScoReceiver()
         pendingNegotiation = null
         releaseSessionInternal(clearMode = true)
         val fallback = selectNonBluetoothInputPolicy().also { activeInputPolicy = it }
@@ -508,7 +514,9 @@ class BluetoothAudioRouteController(
             (mode == AudioManager.MODE_IN_COMMUNICATION && !communicationOwned)
     }
 
-    private fun findPreferredBluetoothCommEndpoint(inputs: List<AudioEndpoint>): Pair<InputRouteKind, AudioEndpoint?>? {
+    private fun findPreferredBluetoothCommEndpoint(
+        inputs: List<AudioEndpoint>, outputs: List<AudioEndpoint>,
+    ): Pair<InputRouteKind, AudioEndpoint?>? {
         if (gateway.sdkInt >= Build.VERSION_CODES.S) {
             val comm = gateway.getAvailableCommunicationEndpoints()
             comm.firstOrNull { it.type == TYPE_BLE_HEADSET_COMPAT }?.let {
@@ -521,9 +529,11 @@ class BluetoothAudioRouteController(
         }
         // API 26–30: Classic SCO only, gated on off-call availability + visible SCO input or BT output.
         if (!gateway.isBluetoothScoAvailableOffCall()) return null
-        val scoInput = inputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-        if (scoInput != null) return InputRouteKind.BLUETOOTH_SCO to scoInput
-        return null
+        // Some HFP inputs only materialize *after* startBluetoothSco. An output is a reason
+        // to negotiate, never evidence of a working mic. Wait for CONNECTED or the timeout.
+        val candidate = inputs.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ||
+            outputs.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+        return if (candidate) InputRouteKind.BLUETOOTH_SCO to null else null
     }
 
     private fun findMatchingInputEndpoint(kind: InputRouteKind): AudioEndpoint? {

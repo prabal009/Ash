@@ -370,6 +370,22 @@
                 android:orientation="vertical" />
         </com.google.android.material.card.MaterialCardView>
 
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/directCallSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:saveEnabled="false"
+            android:text="@string/direct_contact_calls"
+            android:textColor="@color/text" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="32dp"
+            android:text="@string/direct_contact_calls_hint"
+            android:textColor="@color/text_dim"
+            android:textSize="12sp" />
+
         <Button
             android:id="@+id/mediaAccess"
             style="@style/Widget.Material3.Button.TextButton"

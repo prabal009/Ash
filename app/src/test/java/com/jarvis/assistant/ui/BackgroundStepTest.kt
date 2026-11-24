@@ -44,7 +44,8 @@ class BackgroundStepTest {
         assertTrue(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE in perms)
         assertFalse(Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS in perms)
         assertFalse(Manifest.permission.WAKE_LOCK in perms)
-        assertFalse(Manifest.permission.CALL_PHONE in perms)
+        // CALL_PHONE is declared solely for opt-in Direct Calling Mode in Settings.
+        assertTrue(Manifest.permission.CALL_PHONE in perms)
         assertFalse(Manifest.permission.READ_PHONE_STATE in perms)
     }
 

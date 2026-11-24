@@ -33,6 +33,12 @@ class LocalServerManager(context: Context, private val settings: Settings) {
         false
     }
 
+    private fun termuxHomeDir(): String {
+        val dataDir = runCatching { app.packageManager.getApplicationInfo(TERMUX_PACKAGE, 0).dataDir }
+            .getOrNull()?.takeIf { it.isNotBlank() } ?: "/data/data/$TERMUX_PACKAGE"
+        return "$dataDir/files/home"
+    }
+
     /** Asks Termux to run the start script. The script itself refuses to start a second server. */
     fun requestStart(): StartResult {
         val result = when {
@@ -40,11 +46,14 @@ class LocalServerManager(context: Context, private val settings: Settings) {
             !isTermuxInstalled() -> StartResult.NO_TERMUX
             !throttle.tryAcquire() -> StartResult.THROTTLED
             else -> try {
+                val home = termuxHomeDir()
+                val script = settings.termuxScriptOverride?.takeIf { it.isNotBlank() }
+                    ?: "$home/.jarvis/start-llama.sh"
                 val intent = Intent(RUN_COMMAND_ACTION)
                     .setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
-                    .putExtra("com.termux.RUN_COMMAND_PATH", settings.termuxScriptPath)
+                    .putExtra("com.termux.RUN_COMMAND_PATH", script)
                     .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf<String>())
-                    .putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
+                    .putExtra("com.termux.RUN_COMMAND_WORKDIR", home)
                     .putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
                 if (app.startService(intent) != null) StartResult.SENT else StartResult.FAILED
             } catch (_: SecurityException) {

@@ -31,11 +31,12 @@ import java.util.concurrent.TimeUnit
 object Kokoro {
     private const val TAG = "Kokoro"
     const val SAMPLE_RATE = 24000
-    // Kept for 10 minutes so a conversation never pays the reload; freed at once if Android reports memory pressure.
-    private const val IDLE_UNLOAD_MS = 600_000L
+    // Kept for 2 minutes so active conversations stay warm while standby memory stays lean on OEM devices.
+    private const val IDLE_UNLOAD_MS = 120_000L
     const val MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-en-v0_19.tar.bz2"
     val STOCK_PHRASES = listOf(
         "Yes?", "On it.", "Please unlock your phone and I'll get started.",
+        "I can do that, but please unlock your phone first.",
         // short replies to the most common instant commands, ready before they are needed
         "Okay.", "Done.", "Going back.", "Home.", "Flashlight on.", "Flashlight off.", "Paused.", "Playing.",
         "Sorry, I didn't catch that.",

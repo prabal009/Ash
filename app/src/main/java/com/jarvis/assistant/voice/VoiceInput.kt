@@ -44,7 +44,7 @@ object WakeModel {
     const val JOINER = "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
     val KEEP_FILES = setOf(ENCODER, DECODER, JOINER, "tokens.txt")
     /** SentencePiece rows from this transducer's GigaSpeech vocabulary. */
-    const val KEYWORDS = "▁HE Y ▁A SH :2.6 #0.075 @HEY_ASH\n▁HE LL O ▁A SH :2.0 #0.1 @HELLO_ASH\n"
+    const val KEYWORDS = "▁HE Y ▁A SH :2.9 #0.055 @HEY_ASH\n▁HE LL O ▁A SH :2.0 #0.1 @HELLO_ASH\n"
     /** An optional interruption while Ash is speaking. */
     const val STOP_KEYWORD = "▁ST O P :2.0 #0.15 @STOP"
     fun dir(context: Context) = File(context.filesDir, "kws")
@@ -966,8 +966,9 @@ class VoiceInput(
         private fun cleanPrefix(raw: String, prefix: Regex?): String {
             val text = raw.trim()
             val match = prefix?.find(text)
-            return (if (match == null) text else text.substring(match.range.last + 1))
-                .replaceFirstChar { it.uppercase() }
+            val stripped = (if (match == null) text else text.substring(match.range.last + 1))
+                .trimStart { !it.isLetterOrDigit() }
+            return if (stripped.none { it.isLetterOrDigit() }) "" else stripped.replaceFirstChar { it.uppercase() }
         }
 
         /** Drops words that started in the wake span; never clips the subwords of a command. */

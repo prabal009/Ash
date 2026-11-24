@@ -12,6 +12,8 @@ class CleanTranscriptTest {
         assertEquals("Send my wife a message", VoiceInput.clean("hey ash send my wife a message", "Hey Ash"))
         assertEquals("Turn on the flashlight", VoiceInput.clean("Hello Ash, turn on the flashlight", "Hello Ash"))
         assertEquals("", VoiceInput.clean("Hey Ash.", "Hey Ash"))
+        assertEquals("", VoiceInput.clean("Hey Ash, .", "Hey Ash"))
+        assertEquals("", VoiceInput.clean(".", "Hey Ash"))
         assertEquals("", VoiceInput.clean("Hello Ash!", "Hello Ash"))
         assertEquals("", VoiceInput.clean("Hello asked", "Hello Ash"))
         assertEquals("", VoiceInput.clean("Hey asked", "Hey Ash"))

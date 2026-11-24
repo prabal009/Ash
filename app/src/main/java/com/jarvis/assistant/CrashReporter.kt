@@ -6,23 +6,36 @@ import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
 import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /** Keeps a report of the last crash so the user can share it, since we can't attach a debugger to their phone. */
 object CrashReporter {
-    private fun file(context: Context) = File(context.filesDir, "last_crash.txt")
+    private fun file(context: Context) = File(context.filesDir, "crash_locations.txt")
     private fun prefs(context: Context) = context.getSharedPreferences("crash", Context.MODE_PRIVATE)
 
     fun install(app: Application) {
+        // Reports from older versions can contain raw exception messages; never offer to share them.
+        File(app.filesDir, "last_crash.txt").delete()
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             runCatching {
-                val trace = StringWriter().also { error.printStackTrace(PrintWriter(it)) }.toString()
-                file(app).writeText(header(app) + "Thread: ${thread.name}\n\n$trace")
+                // Exception messages, thread names and ANR traces can contain request payloads.
+                // Export diagnostic locations, never free-form application or provider data.
+                file(app).writeText(buildString {
+                    append(header(app))
+                    var cause: Throwable? = error
+                    repeat(4) {
+                        val current = cause ?: return@buildString
+                        appendLine(current.javaClass.name)
+                        current.stackTrace.take(24).forEach { frame ->
+                            append("  at ").append(frame.className).append('.').append(frame.methodName)
+                                .append(':').appendLine(frame.lineNumber)
+                        }
+                        cause = current.cause
+                    }
+                })
             }
             previous?.uncaughtException(thread, error)
         }
@@ -42,10 +55,7 @@ object CrashReporter {
             ApplicationExitInfo.REASON_ANR -> "App not responding"
             else -> "Crash"
         }
-        val trace = if (exit.reason == ApplicationExitInfo.REASON_ANR)
-            runCatching { exit.traceInputStream?.bufferedReader()?.readText()?.take(6000) }.getOrNull().orEmpty() else ""
-        return header(context) + "$kind at ${fmt(exit.timestamp)}\nProcess: ${exit.processName}\n" +
-            "Details: ${exit.description ?: "none"}\nStatus: ${exit.status}\n" + (if (trace.isNotEmpty()) "\n$trace" else "")
+        return header(context) + "$kind at ${fmt(exit.timestamp)}\nStatus: ${exit.status}\n"
     }
 
     fun dismiss(context: Context) {

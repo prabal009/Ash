@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.jarvis.assistant.R
 import com.jarvis.assistant.service.JarvisService
@@ -32,6 +33,17 @@ class SettingsFragment : Fragment() {
     private val refreshers = mutableListOf<() -> Unit>()
     private var preview: Speaker? = null
     private val onDownload: () -> Unit = { refreshers.forEach { it() } }
+    private val callPermissions = arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE)
+    private val requestCallPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val granted = hasCallPermissions()
+        settings.directContactCalls = granted
+        _ui?.directCallSwitch?.isChecked = granted
+        if (!granted) Toast.makeText(requireContext(), R.string.direct_contact_calls_denied, Toast.LENGTH_LONG).show()
+    }
+
+    private fun hasCallPermissions(): Boolean = callPermissions.all {
+        ContextCompat.checkSelfPermission(requireContext(), it) == PackageManager.PERMISSION_GRANTED
+    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, state: Bundle?): View {
         _ui = FragmentSettingsBinding.inflate(inflater, container, false)
@@ -103,6 +115,26 @@ class SettingsFragment : Fragment() {
 
         // Permissions
         refreshers += Setup.bindRows(activity, ui.permissionRows, listOf(Setup.Item.MICROPHONE, Setup.Item.PHONE_CONTROL, Setup.Item.BACKGROUND))
+        ui.directCallSwitch.setOnClickListener {
+            if (!ui.directCallSwitch.isChecked) {
+                settings.directContactCalls = false
+            } else {
+                // Showing a checked switch before the user consents or Android grants access is misleading.
+                ui.directCallSwitch.isChecked = false
+                AlertDialog.Builder(activity)
+                    .setTitle(R.string.direct_contact_calls)
+                    .setMessage(R.string.direct_contact_calls_hint)
+                    .setNegativeButton(R.string.cancel, null)
+                    .setPositiveButton(R.string.direct_contact_calls_enable) { _, _ ->
+                        if (hasCallPermissions()) {
+                            settings.directContactCalls = true
+                            ui.directCallSwitch.isChecked = true
+                        } else {
+                            requestCallPermissions.launch(callPermissions)
+                        }
+                    }.show()
+            }
+        }
         ui.mediaAccess.setOnClickListener {
             AlertDialog.Builder(activity)
                 .setTitle(R.string.ash_media_access)
@@ -160,6 +192,8 @@ class SettingsFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        if (settings.directContactCalls && !hasCallPermissions()) settings.directContactCalls = false
+        ui.directCallSwitch.isChecked = settings.directContactCalls
         Kokoro.warmUp(requireContext()) // so Preview responds quickly
         Downloads.listen(onDownload)
         refreshers.forEach { it() }

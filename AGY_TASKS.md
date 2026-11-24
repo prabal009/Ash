@@ -41,6 +41,22 @@
 - [x] Write `docs/ash/04-test-report.md` with ADB physical-device procedure and Gemini Argon handoff
 - [ ] Execute physical-device ADB test matrix (no Android device or instrumentation suite attached during Phase 5)
 
+## Phase 6: Independent Final Security and Reliability Audit
+
+- [x] Review all prior reports (`00`–`04`) chronologically and inspect git state on `phase4-bluetooth-integration`
+- [x] Independently audit wake-word detection, Android background/FGS/assistant behavior, Bluetooth/audio routing, phone automation safety, credential/network security, code reliability, performance/privacy, and Phase 5 test evidence
+- [x] Document verified findings (`HIGH-01` through `LOW-02`), verdicts, release-readiness decision (`READY FOR CONTROLLED DEVICE TESTING`), and prioritized correction plan for GPT Sol / GPT Astra in `docs/ash/05-security-review.md`
+
+## Phase 7: End-to-End Engineering, Direct Calling, Background Reliability & CPH2467 Validation
+
+- [x] Inspect connected OnePlus CPH2467 (Android 15, API 35) via ADB, recover half-applied uncommitted edits, and verify `AshVoiceInteractionService` + `JarvisAccessibilityService` bindings
+- [x] Implement opt-in Direct Calling Mode (`DirectCallPolicy`, `CALL_PHONE`, `TelecomManager.placeCall`, duplicate cooldown, `ACTION_DIAL` fallback) and extended phone control (`userControl`, `OpenWebsite`, `YouTubeSearch`, `ClearText`, `SubmitSearch`)
+- [x] Fix Phase 6 audit defects (`HIGH-01` Bluetooth `host.ask()`/`TurnInputRoute`, `HIGH-02` API 26–30 SCO, `HIGH-03` `@HEY_ASH` `:2.9 #0.055` + punctuation wake-tail bug, `MED-01` BLE teardown, `MED-04` dead legacy removal, `LOW-01` `AudioPlaybackCallback`, `LOW-02` Termux `dataDir`)
+- [x] Harden screen-off/background reliability (`AudioRecordingCallback` + `ACTION_MICROPHONE_MUTE_CHANGED` recovery, remove 30s armed-standby `stopSelf()`, `LockedCommands` + `PendingUnlock`, reduce `Kokoro.IDLE_UNLOAD_MS` to 2m for OnePlus `o-kill(40)` mitigation)
+- [x] Verify full build (`40 suites, 268 unit tests passed`, `0 lint errors / 27 warnings`, `-Preal` `HEY_ASH=9/12`, `HELLO_ASH=12/12`, `FALSE=0/12`, `saysSorryWhenNothingFollowsTheWakeWord` PASS, 4 ABI-verified APKs) and install fresh `app-arm64-v8a-debug.apk` onto OnePlus CPH2467
+- [x] Write `docs/ash/06-final-validation.md` and `docs/ash/07-background-reliability.md` with actual CPH2467 telemetry and manual test checklist
+- [ ] Complete interactive voice, Bluetooth earbud, authorized live call, and 60-minute unplugged screen-off soak tests on OnePlus CPH2467
+
 ## Future Backlog
 
 - [x] Restore Android SDK 35 / JDK 21 and verify `testDebugUnitTest` and `lintDebug` baseline

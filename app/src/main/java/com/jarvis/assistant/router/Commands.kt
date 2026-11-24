@@ -1,6 +1,9 @@
 package com.jarvis.assistant.router
 
+import android.content.Intent
+import android.net.Uri
 import com.jarvis.assistant.ai.AiMode
+import java.net.URI
 
 enum class VolumeChange { UP, DOWN, MUTE, UNMUTE, SET }
 enum class MediaAction { PLAY, PAUSE, NEXT, PREVIOUS }
@@ -15,13 +18,31 @@ sealed interface FastCommand {
     data class Press(val key: String) : FastCommand
 
     /** direction is one of: up, down, left, right. */
-    data class Scroll(val direction: String) : FastCommand
+    data class Scroll(val direction: String, val page: Boolean = false) : FastCommand
     data class Volume(val change: VolumeChange, val percent: Int? = null) : FastCommand
 
     /** on = null means toggle. */
     data class Flashlight(val on: Boolean?) : FastCommand
     data class Media(val action: MediaAction, val app: String? = null) : FastCommand
     data class WebSearch(val query: String, val site: String = "google") : FastCommand
+    data class OpenWebsite(val address: String) : FastCommand {
+        fun normalizedUrl(): String? {
+            val trimmed = address.trim()
+            if (trimmed.isEmpty() || trimmed.any { it.isWhitespace() }) return null
+            val candidate = if ("://" in trimmed) trimmed else "https://$trimmed"
+            val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
+            val scheme = uri.scheme?.lowercase()
+            val host = uri.host?.lowercase()
+            if (scheme !in setOf("https", "http") || host.isNullOrBlank() || '.' !in host) return null
+            return uri.toASCIIString()
+        }
+
+        fun browserIntent(): Intent? {
+            val url = normalizedUrl() ?: return null
+            return Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
+        }
+    }
+    data class YouTubeSearch(val query: String) : FastCommand
 
     data class PlayMusic(val query: String, val app: String? = null) : FastCommand
     data class OpenSettings(val page: String, val toggleRequested: Boolean = false) : FastCommand
@@ -34,6 +55,8 @@ sealed interface FastCommand {
     data class CallContact(val name: String) : FastCommand
     data class TapText(val text: String) : FastCommand
     data class TypeText(val text: String) : FastCommand
+    data object ClearText : FastCommand
+    data object SubmitSearch : FastCommand
     data object Screenshot : FastCommand
     data object LockScreen : FastCommand
     data class Ask(val kind: QueryKind) : FastCommand

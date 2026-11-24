@@ -81,6 +81,10 @@ object FastCommandRouter {
     private val IN_APP_WORDS = setOf("spotify", "amazon", "flipkart", "zomato", "swiggy", "instagram", "whatsapp", "telegram", "facebook", "twitter", "netflix", "hotstar", "gmail", "maps", "paytm", "phonepe", "uber", "ola")
 
     private val TYPE_RAW = Regex("""^(?:please\s+)?type\s+(.+)$""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    private val CLEAR_TEXT = Regex("""^(?:clear|erase|delete)(?: all| the)? (?:text|field|text field|input|search|box)(?: karo| kar do)?$|^clear it$""")
+    private val SUBMIT_SEARCH = Regex("""^(?:submit|press|hit|tap|click)(?: the)? search(?: button)?(?: karo| kar do)?$""")
+    private val YOUTUBE_OPEN_SEARCH = Regex("""^(?:open|launch|start) youtube (?:and |then |aur )?search(?: for)? (.+)$""")
+    private val WEBSITE_OPEN = Regex("""^(?:open|go to|visit|launch)(?: website| site)? ((?:https?://)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/\S*)?)$""")
     private val TAP_A = Regex("""^(?:tap|click|press|touch|select|dabao|dabana)(?: on)?(?: the)? (.{1,30}?)(?: button| option| icon| tab)?$""")
     private val TAP_B = Regex("""^(.{1,30}?) (?:dabao|dabana|dabaiye|click karo|tap karo|press karo)$""")
     private val TAP_GENERIC = setOf("it", "this", "that", "screen", "anywhere", "here", "there", "something")
@@ -100,6 +104,7 @@ object FastCommandRouter {
         return dial(t, utterance) ?: callContact(t)
             ?: mode(t) ?: language(t, words) ?: runtime(t)
             ?: press(t) ?: screenshotOrLock(t) ?: scroll(words)
+            ?: clearOrSubmit(t) ?: youtubeSearch(t) ?: openWebsite(utterance)
             ?: media(words) ?: scopedMedia(t) ?: playMusic(t)
             ?: volume(t, words) ?: flashlight(words)
             ?: query(t) ?: timerOrAlarm(t, words) ?: settingsPage(t, words) ?: camera(t)
@@ -343,6 +348,26 @@ object FastCommandRouter {
     private fun typeText(raw: String): FastCommand? {
         val text = TYPE_RAW.matchEntire(raw.trim())?.groupValues?.get(1)?.trim().orEmpty()
         return if (text.isNotEmpty() && text.length <= 300) FastCommand.TypeText(text) else null
+    }
+
+    private fun clearOrSubmit(t: String): FastCommand? = when {
+        CLEAR_TEXT.matches(t) -> FastCommand.ClearText
+        SUBMIT_SEARCH.matches(t) -> FastCommand.SubmitSearch
+        else -> null
+    }
+
+    private fun youtubeSearch(t: String): FastCommand? {
+        val m = YOUTUBE_OPEN_SEARCH.matchEntire(t) ?: return null
+        val q = m.groupValues[1].trim()
+        if (q.isEmpty() || q.split(' ').size > 8 || " and " in " $q ") return null
+        return FastCommand.YouTubeSearch(q)
+    }
+
+    private fun openWebsite(raw: String): FastCommand? {
+        val normalized = raw.trim().lowercase().removeSuffix(".")
+        val m = WEBSITE_OPEN.matchEntire(normalized) ?: return null
+        val addr = m.groupValues[1].trim()
+        return FastCommand.OpenWebsite(addr).takeIf { it.normalizedUrl() != null }
     }
 
     private fun tap(t: String): FastCommand? {

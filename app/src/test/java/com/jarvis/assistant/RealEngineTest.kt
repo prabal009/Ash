@@ -231,8 +231,14 @@ class RealEngineTest {
     fun saysSorryWhenNothingFollowsTheWakeWord() {
         installAll()
         playIntoMic(silence(1.0), say("Hey Ash."), silence(14.0))
-        assertTrue(runService(40_000) { JarvisService.status == "Didn't catch that" })
-        assertTrue("no task started", JarvisService.lastTask == null)
+        var sawDidntCatch = false
+        JarvisService.statusListener = { if (it == "Didn't catch that") sawDidntCatch = true }
+        try {
+            assertTrue(runService(40_000) { sawDidntCatch || JarvisService.status == "Didn't catch that" })
+            assertTrue("no task started", JarvisService.lastTask == null)
+        } finally {
+            JarvisService.statusListener = null
+        }
     }
 
     private var seenListening = false

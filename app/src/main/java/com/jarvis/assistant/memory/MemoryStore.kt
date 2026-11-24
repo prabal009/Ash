@@ -24,18 +24,22 @@ class MemoryStore private constructor(context: Context) :
     @Volatile private var ftsReady = false
 
     override fun onCreate(db: SQLiteDatabase) {
+        createMemoryTables(db)
+        createTaskTable(db)
+        addReplaySchema(db)
+    }
+
+    private fun createMemoryTables(db: SQLiteDatabase) {
         db.execSQL(
-            "CREATE TABLE alias(id INTEGER PRIMARY KEY AUTOINCREMENT, phrase TEXT NOT NULL UNIQUE, target TEXT NOT NULL, " +
+            "CREATE TABLE IF NOT EXISTS alias(id INTEGER PRIMARY KEY AUTOINCREMENT, phrase TEXT NOT NULL UNIQUE, target TEXT NOT NULL, " +
                 "label TEXT NOT NULL, hits INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL)",
         )
         db.execSQL(
-            "CREATE TABLE fact(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, style INTEGER NOT NULL DEFAULT 0, " +
+            "CREATE TABLE IF NOT EXISTS fact(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, style INTEGER NOT NULL DEFAULT 0, " +
                 "updated INTEGER NOT NULL)",
         )
-        createTaskTable(db)
-        addReplaySchema(db)
         try {
-            db.execSQL("CREATE VIRTUAL TABLE fact_fts USING fts4(text)")
+            db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS fact_fts USING fts4(text)")
         } catch (_: SQLException) {
             // Full-text search is optional; searches fall back to LIKE.
         }
@@ -44,6 +48,32 @@ class MemoryStore private constructor(context: Context) :
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createTaskTable(db)
         if (oldVersion < 3) addReplaySchema(db)
+        // Two incompatible v1 helpers used this filename. A previous upgrade could already have
+        // added the v3 task tables to the legacy DB without ever creating the active memory tables.
+        if (oldVersion < 4 && hasTable(db, "memories")) importLegacyMemory(db)
+    }
+
+    private fun hasTable(db: SQLiteDatabase, name: String) =
+        db.rawQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", arrayOf(name)).use { it.moveToFirst() }
+
+    private fun importLegacyMemory(db: SQLiteDatabase) {
+        createMemoryTables(db)
+        // Do not mark old preferences as shareable style notes. Keep them private like other facts.
+        db.execSQL("""INSERT INTO fact(text,style,updated)
+            SELECT CASE WHEN key_text = 'fact' THEN value_text ELSE key_text || ': ' || value_text END, 0, updated_at
+            FROM memories""")
+        if (hasTable(db, "fact_fts")) {
+            db.execSQL("INSERT OR REPLACE INTO fact_fts(docid,text) SELECT id,text FROM fact")
+        }
+        // Legacy aliases stored display names, not package IDs. Retain them as phrase replacements.
+        db.execSQL("""INSERT OR IGNORE INTO alias(phrase,target,label,hits,updated)
+            SELECT lower(trim(original_phrase)), 'text:' || corrected_action, corrected_action, usage_count, updated_at
+            FROM command_corrections""")
+        db.execSQL("""INSERT OR IGNORE INTO alias(phrase,target,label,hits,updated)
+            SELECT lower(trim(trigger_phrase)), 'text:' || target_name, target_name, 0, created_at FROM aliases""")
+        db.execSQL("DROP TABLE memories")
+        db.execSQL("DROP TABLE aliases")
+        db.execSQL("DROP TABLE command_corrections")
     }
 
     private fun createTaskTable(db: SQLiteDatabase) {
@@ -371,7 +401,7 @@ class MemoryStore private constructor(context: Context) :
 
     companion object {
         private const val DB_NAME = "jarvis_memory.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
         const val MAX_FACTS = 300
         const val MAX_TASKS = 100
 

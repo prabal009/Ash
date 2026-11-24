@@ -11,6 +11,8 @@ class ContactResolver(context: Context) {
 
     fun hasContactsPermission() = granted(Manifest.permission.READ_CONTACTS)
 
+    fun hasCallPermission() = granted(Manifest.permission.CALL_PHONE)
+
     private fun granted(p: String) = app.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     fun contacts(): List<ContactEntry> = query()

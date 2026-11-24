@@ -89,14 +89,21 @@ class CrashSafetyTest {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         try {
             Thread.setDefaultUncaughtExceptionHandler { _, _ -> } // stand-in for the system handler
+            File(ctx.filesDir, "last_crash.txt").writeText("old unredacted report")
             CrashReporter.install(ApplicationProvider.getApplicationContext())
-            Thread.getDefaultUncaughtExceptionHandler()!!.uncaughtException(Thread.currentThread(), IllegalStateException("boom"))
+            assertNull(CrashReporter.pending(ctx))
+            val error = IllegalStateException("private transcript", IllegalArgumentException("provider credential"))
+            Thread.getDefaultUncaughtExceptionHandler()!!.uncaughtException(Thread.currentThread(), error)
         } finally {
             Thread.setDefaultUncaughtExceptionHandler(previous)
         }
         val report = CrashReporter.pending(ctx)
         assertNotNull(report)
-        assertTrue(report!!.contains("IllegalStateException: boom"))
+        assertTrue(report!!.contains("IllegalStateException"))
+        assertTrue(report.contains("IllegalArgumentException"))
+        assertTrue(report.contains("crashReportIsKeptAndCanBeDismissed"))
+        assertFalse(report.contains("private transcript"))
+        assertFalse(report.contains("provider credential"))
         CrashReporter.dismiss(ctx)
         assertNull(CrashReporter.pending(ctx))
     }

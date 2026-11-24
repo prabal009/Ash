@@ -7,6 +7,8 @@ package com.jarvis.assistant.audio
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
@@ -34,6 +36,12 @@ class HeadsetButtonBridge(
     private val onTrigger: (RouteTrigger) -> Unit,
 ) {
     private val app = context.applicationContext
+    private val audio = app.getSystemService(AudioManager::class.java)
+    private val playbackCallback = object : AudioManager.AudioPlaybackCallback() {
+        override fun onPlaybackConfigChanged(configs: List<AudioPlaybackConfiguration>) {
+            refreshPriority()
+        }
+    }
     private var session: MediaSession? = null
     private var enabled = false
     private var pendingPresses = 0
@@ -71,21 +79,24 @@ class HeadsetButtonBridge(
             return
         }
         val shouldBeActive = !isMusicActive()
+        if (!shouldBeActive && pendingPresses != 0) {
+            main.removeCallbacks(debounce)
+            pendingPresses = 0
+        }
         if (current.isActive != shouldBeActive) {
             runCatching { current.isActive = shouldBeActive }
         }
     }
 
-    /** Releases the MediaSession and cancels any pending debounce timer. */
+    /** Releases the MediaSession, its playback observer, and any pending debounce timer. */
     fun release() {
         enabled = false
         pendingPresses = 0
         main.removeCallbacks(debounce)
         session?.let { s ->
-            runCatching {
-                s.isActive = false
-                s.release()
-            }
+            runCatching { audio?.unregisterAudioPlaybackCallback(playbackCallback) }
+            runCatching { s.isActive = false }
+            runCatching { s.release() }
         }
         session = null
     }
@@ -126,6 +137,7 @@ class HeadsetButtonBridge(
 
     private fun ensureSession() {
         if (session != null) return
+        val manager = audio ?: return
         val created = runCatching { MediaSession(app, SESSION_TAG) }.getOrNull() ?: return
         @Suppress("DEPRECATION")
         created.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS)
@@ -149,6 +161,13 @@ class HeadsetButtonBridge(
             },
             main,
         )
+        // If playback cannot be observed, don't claim a button that may belong to a music player.
+        try {
+            manager.registerAudioPlaybackCallback(playbackCallback, main)
+        } catch (_: RuntimeException) {
+            created.release()
+            return
+        }
         session = created
     }
 

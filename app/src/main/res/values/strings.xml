@@ -92,7 +92,11 @@
     <string name="use_embedded_model">Use the on-device model built into Ash</string>
     <string name="allow_mobile_data_download">Allow the model download on mobile data</string>
     <string name="download_embedded_model">Download on-device model</string>
-    <string name="allow_contacts">Allow contacts and calling</string>
+    <string name="allow_contacts">Allow contact lookup</string>
+    <string name="direct_contact_calls">Direct contact calls</string>
+    <string name="direct_contact_calls_hint">Off: confirm before opening the dialer. On: while unlocked, saying “Call” and an exact saved name can immediately place a call to its single ordinary number. Carrier charges may apply.</string>
+    <string name="direct_contact_calls_enable">Enable direct calls</string>
+    <string name="direct_contact_calls_denied">Direct calls are off. To use them, allow Contacts and Phone in Ash’s app permissions.</string>
     <string name="memories">Memories</string>
     <string name="mode_auto">Auto</string>
     <string name="mode_online">Online</string>

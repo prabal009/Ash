@@ -14,6 +14,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
+import android.media.AudioRecordingConfiguration
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -146,16 +147,26 @@ class JarvisService : Service() {
     private var standby = false
     private var invocation = 0
     private var captureRequest = 0
+    private val inputRoute by lazy { TurnInputRoute(audioRoutes, voice::stop) }
+    private var headsetTurn = false
+    private val pendingUnlock = PendingUnlock(SystemClock::elapsedRealtime)
     private var pendingAnswer: (() -> Unit)? = null
     private var micStop: Runnable? = null
     private var captureState = VoiceState.DISABLED
     private var audioModeListener: AudioManager.OnModeChangedListener? = null
+    private var audioRecordingCallback: AudioManager.AudioRecordingCallback? = null
     private var screenReceiverRegistered = false
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_SCREEN_OFF &&
-                (state != State.IDLE || captureState == VoiceState.SPEAKING)) {
-                cancelVoiceTurn("Screen locked. Repeat the request if needed.")
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    pendingUnlock.clear()
+                    if (state != State.IDLE || captureState == VoiceState.SPEAKING) {
+                        cancelVoiceTurn("Screen locked. Repeat the request if needed.")
+                    }
+                }
+                Intent.ACTION_USER_PRESENT -> resumeAfterUnlock()
+                AudioManager.ACTION_MICROPHONE_MUTE_CHANGED -> onAudioPolicyChanged()
             }
         }
     }
@@ -238,22 +249,33 @@ class JarvisService : Service() {
                 }
             }
         })
-        ContextCompat.registerReceiver(this, screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
+        val systemFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_USER_PRESENT)
+            addAction(AudioManager.ACTION_MICROPHONE_MUTE_CHANGED)
+        }
+        ContextCompat.registerReceiver(this, screenReceiver, systemFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
         screenReceiverRegistered = true
+        val am = getSystemService(AudioManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val listener = AudioManager.OnModeChangedListener { mode ->
-                if (!destroyed && standby && state == State.IDLE && captureState == VoiceState.INTERRUPTED &&
-                    mode == AudioManager.MODE_NORMAL
-                ) {
-                    micStop?.let(main::removeCallbacks)
-                    micStop = null
-                    resumeListening()
-                }
+                if (mode == AudioManager.MODE_NORMAL) onAudioPolicyChanged()
             }
             runCatching {
-                getSystemService(AudioManager::class.java)?.addOnModeChangedListener(mainExecutor, listener)
+                am?.addOnModeChangedListener(mainExecutor, listener)
                 audioModeListener = listener
             }
+        }
+        val recCb = object : AudioManager.AudioRecordingCallback() {
+            override fun onRecordingConfigChanged(configs: List<AudioRecordingConfiguration>) {
+                if (!destroyed && standby && state == State.IDLE && captureState == VoiceState.INTERRUPTED && configs.isEmpty()) {
+                    main.postDelayed({ onAudioPolicyChanged() }, 400L)
+                }
+            }
+        }
+        runCatching {
+            am?.registerAudioRecordingCallback(recCb, main)
+            audioRecordingCallback = recCb
         }
         update("Starting…")
     }
@@ -277,7 +299,7 @@ class JarvisService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_RUN -> intent.getStringExtra(EXTRA_TASK)?.let { runTask(it) }
+            ACTION_RUN -> intent.getStringExtra(EXTRA_TASK)?.let { runTask(it, fromVoice = false) }
                 ?: resumeListening()
             ACTION_WAKE_SETTINGS -> {
                 voice.customWakePhrase = settings.customWakePhrase
@@ -330,6 +352,22 @@ class JarvisService : Service() {
         stopSelf()
     }
 
+    private fun onAudioPolicyChanged() {
+        if (destroyed || !standby || state != State.IDLE || captureState != VoiceState.INTERRUPTED) return
+        val am = getSystemService(AudioManager::class.java) ?: return
+        if (am.mode == AudioManager.MODE_NORMAL && !am.isMicrophoneMute) {
+            micStop?.let(main::removeCallbacks)
+            micStop = null
+            resumeListening()
+        }
+    }
+
+    private fun resumeAfterUnlock() {
+        if (destroyed || state != State.IDLE || deviceLocked()) return
+        val pending = pendingUnlock.take(unlocked = true) ?: return
+        executeFastCommand(pending, task = pending.toString(), fromVoice = false)
+    }
+
     private fun onMicProblem(problem: String) {
         if (destroyed) return
         when (problem) {
@@ -341,13 +379,21 @@ class JarvisService : Service() {
                     update("Listening for ${settings.wakePromptPhrase}")
                 }
             }
-            "interrupted" -> {
+            "interrupted", "silent" -> {
                 captureState = VoiceState.INTERRUPTED
                 cancelVoiceTurn("Microphone paused by Android", resume = false)
                 micStop?.let(main::removeCallbacks)
-                micStop = Runnable {
-                    if (!destroyed && captureState == VoiceState.INTERRUPTED) stopSelf()
-                }.also { main.postDelayed(it, 30_000) }
+                micStop = if (!standby) {
+                    Runnable {
+                        if (!destroyed && captureState == VoiceState.INTERRUPTED) stopSelf()
+                    }.also { main.postDelayed(it, 30_000) }
+                } else if (problem == "silent") {
+                    // Single bounded recovery attempt for transient digital silence in armed standby;
+                    // call/recording interruptions recover event-driven via OnModeChangedListener / AudioRecordingCallback.
+                    Runnable { onAudioPolicyChanged() }.also { main.postDelayed(it, 3_000) }
+                } else {
+                    null
+                }
             }
             "retrying" -> {
                 captureState = VoiceState.ERROR_RECOVERY
@@ -369,6 +415,7 @@ class JarvisService : Service() {
         interruptedWork = false
         heldDelivery = null
         invocation = 0
+        headsetTurn = false
         interruptSpeech()
         state = State.IDLE
         island { it.hide() }
@@ -410,6 +457,11 @@ class JarvisService : Service() {
             }
             audioModeListener = null
         }
+        audioRecordingCallback?.let { cb ->
+            runCatching { getSystemService(AudioManager::class.java)?.unregisterAudioRecordingCallback(cb) }
+        }
+        audioRecordingCallback = null
+        pendingUnlock.clear()
         if (screenReceiverRegistered) unregisterReceiver(screenReceiver)
         if (runtimeOwner.isInitialized()) runtime.stop("service destroyed")
         taskId++
@@ -587,22 +639,15 @@ class JarvisService : Service() {
                 }
             }
         }
-        val tryHeadset = preferHeadset && !followUp && !interrupted &&
-            settings.bluetoothMicEnabled && audioRoutes.currentSnapshot().bluetoothMicAvailable
-        if (tryHeadset) {
-            // Stop the standby phone recorder before opening a headset communication link.
-            voice.stop {
-                if (destroyed || request != captureRequest || state != State.LISTENING_COMMAND) return@stop
-                audioRoutes.prepareCommandInput(preferHeadset = true) { _, usedFallback ->
-                    if (destroyed || request != captureRequest || state != State.LISTENING_COMMAND) {
-                        audioRoutes.releaseSession()
-                        return@prepareCommandInput
-                    }
-                    if (usedFallback) update("Listening (phone mic)…")
-                    startCapture()
-                }
-            }
-        } else {
+        val tryHeadset = preferHeadset && !interrupted
+        inputRoute.prepare(
+            preferHeadset = tryHeadset,
+            requireHeadset = false,
+            bluetoothEnabled = settings.bluetoothMicEnabled,
+            isCurrent = { !destroyed && request == captureRequest && state == State.LISTENING_COMMAND },
+        ) { routeResult ->
+            headsetTurn = routeResult == TurnInputRoute.Result.HEADSET
+            if (routeResult == TurnInputRoute.Result.PHONE_FALLBACK) update("Listening (phone mic)…")
             startCapture()
         }
     }
@@ -872,7 +917,7 @@ class JarvisService : Service() {
         }
     }
 
-    private fun runTask(spoken: String) {
+    private fun runTask(spoken: String, fromVoice: Boolean = true) {
         if (destroyed) return
         invalidateInput()
         if (!phrasesLoaded) {
@@ -882,11 +927,13 @@ class JarvisService : Service() {
         val task = PhraseCorrector.apply(spoken, phraseMap)
         val memoryIntent = MemoryIntentParser.parse(task)
         val fast = if (memoryIntent == null) FastCommandRouter.parse(task) else null
-        if (deviceLocked() && (fast == null || needsUnlock(fast))) {
+        if (deviceLocked() && (fast == null || !LockedCommands.allows(fast))) {
             cancelForeground()
+            pendingUnlock.offer(fast)
             state = State.IDLE
-            update("Unlock your phone and repeat the request.")
-            say("Unlock your phone and repeat the request.") { resumeListening() }
+            val msg = "I can do that, but please unlock your phone first."
+            update(msg)
+            say(msg) { resumeListening() }
             return
         }
         // Phrases about the tasks themselves are never tasks: "cancel", "stop that, open YouTube", "what are you doing".
@@ -961,7 +1008,8 @@ class JarvisService : Service() {
                             fastActions.execute(
                                 command, recordStep = { if (keep) history.step(id, it) },
                                 asker = { question -> hostFor(id).ask(question) },
-                                canAct = { !destroyed && !isStale(id) && (!needsUnlock(command) || !deviceLocked()) },
+                                spokenRequest = if (fromVoice) task else null,
+                                canAct = { !destroyed && !isStale(id) && (LockedCommands.allows(command) || !deviceLocked()) },
                             )
                         }
                     }
@@ -981,11 +1029,35 @@ class JarvisService : Service() {
         runModelTask(task, id, type)
     }
 
-    private fun needsUnlock(c: FastCommand): Boolean = when (c) {
-        is FastCommand.Ask -> c.kind != QueryKind.TIME
-        is FastCommand.Media -> c.app != null
-        else -> true
+    private fun executeFastCommand(command: FastCommand, task: String, fromVoice: Boolean) {
+        if (destroyed || state != State.IDLE || (!LockedCommands.allows(command) && deviceLocked())) return
+        val type = typeOf(command)
+        val id = idCounter.incrementAndGet()
+        board.start(id, task, type)
+        if (type != TaskType.INSTANT) {
+            taskId = id
+            activeSession = null
+        }
+        state = State.WORKING
+        captureState = VoiceState.PROCESSING
+        update("Working…")
+        worker.execute {
+            val outcome = try {
+                fastActions.execute(
+                    command, recordStep = {},
+                    asker = { question -> hostFor(id).ask(question) },
+                    spokenRequest = if (fromVoice) task else null,
+                    canAct = { !destroyed && !isStale(id) && (LockedCommands.allows(command) || !deviceLocked()) },
+                )
+            } catch (e: Throwable) {
+                Log.e(TAG, "pending action failed", e)
+                FastActionExecutor.Result(true, false, "Something went wrong.")
+            }
+            main.post { deliver(task, id, AgentResult(outcome.success, outcome.message), keepInHistory = false, via = "instant") }
+        }
     }
+
+    private fun needsUnlock(c: FastCommand): Boolean = !LockedCommands.allows(c)
 
     /**
      * If the user repeats a failed "open <name>" with the correct app name, the first name was probably a mis-hearing.
@@ -1117,8 +1189,11 @@ class JarvisService : Service() {
             say(line, interruptible = true) { afterReply() }
             return
         }
-        if (settings.followUp && useOfflineAsr) listen(promptIfQuiet = false, followUp = true)
-        else resumeListening()
+        if (!deviceLocked() && settings.followUp && useOfflineAsr) {
+            listen(promptIfQuiet = false, followUp = true, preferHeadset = headsetTurn)
+        } else {
+            resumeListening()
+        }
     }
 
     private fun remember(task: String, reply: String) {
@@ -1137,6 +1212,7 @@ class JarvisService : Service() {
     private fun resumeListening() {
         if (destroyed || state != State.IDLE) return
         invocation = 0
+        headsetTurn = false
         if (audioRoutes.ownsCommunicationRoute) {
             // Stop the headset AudioRecord first, then release SCO/BLE before returning to standby.
             voice.stop {
@@ -1204,18 +1280,31 @@ class JarvisService : Service() {
                 pendingAnswer = { finishAnswer(null) }
                 update("Asking: $question")
                 say(question, onSkipped = { finishAnswer(null) }) {
-                    if (result.isDone || destroyed || isStale(id) || deviceLocked()) {
+                    val stillValid = { !result.isDone && !destroyed && !isStale(id) && !deviceLocked() && request == captureRequest }
+                    if (!stillValid()) {
                         finishAnswer(null)
                         return@say
                     }
-                    captureState = VoiceState.COMMAND_LISTENING
-                    island { it.listening(if (useOfflineAsr) ({ voice.partialText }) else null, { voice.level }) }
-                    if (useOfflineAsr) {
-                        voice.listenForCommand(10_000, ::finishAnswer)
-                    } else voice.stop {
-                        if (!result.isDone && request == captureRequest) {
-                            google.listen(googleLanguage(), offline = settings.aiMode == AiMode.OFFLINE || googleLanguage() == null,
-                                onResult = ::finishAnswer)
+                    inputRoute.prepare(
+                        preferHeadset = headsetTurn,
+                        requireHeadset = false,
+                        bluetoothEnabled = settings.bluetoothMicEnabled,
+                        isCurrent = stillValid,
+                    ) { routeResult ->
+                        if (!stillValid()) {
+                            finishAnswer(null)
+                            return@prepare
+                        }
+                        if (routeResult == TurnInputRoute.Result.PHONE_FALLBACK) update("Listening (phone mic)…")
+                        captureState = VoiceState.COMMAND_LISTENING
+                        island { it.listening(if (useOfflineAsr) ({ voice.partialText }) else null, { voice.level }) }
+                        if (useOfflineAsr) {
+                            voice.listenForCommand(10_000, ::finishAnswer)
+                        } else voice.stop {
+                            if (stillValid()) {
+                                google.listen(googleLanguage(), offline = settings.aiMode == AiMode.OFFLINE || googleLanguage() == null,
+                                    onResult = ::finishAnswer)
+                            }
                         }
                     }
                 }
@@ -1224,10 +1313,10 @@ class JarvisService : Service() {
                         invalidateInput()
                         interruptSpeech()
                     }
-                }, 20_000)
+                }, 25_000)
             }
             return try {
-                result.get(21, TimeUnit.SECONDS)
+                result.get(26, TimeUnit.SECONDS)
             } catch (_: java.util.concurrent.TimeoutException) {
                 result.complete(null)
                 null

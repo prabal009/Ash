@@ -92,7 +92,11 @@
     <string name="use_embedded_model">Ash में बना ऑन-डिवाइस मॉडल इस्तेमाल करें</string>
     <string name="allow_mobile_data_download">मोबाइल डेटा पर मॉडल डाउनलोड करने दें</string>
     <string name="download_embedded_model">ऑन-डिवाइस मॉडल डाउनलोड करें</string>
-    <string name="allow_contacts">संपर्क और कॉल की अनुमति दें</string>
+    <string name="allow_contacts">संपर्क ढूँढने की अनुमति दें</string>
+    <string name="direct_contact_calls">संपर्कों को सीधे कॉल करें</string>
+    <string name="direct_contact_calls_hint">बंद: डायलर खोलने से पहले पुष्टि माँगी जाएगी। चालू: फ़ोन अनलॉक होने पर किसी सहेजे गए संपर्क का सटीक नाम लेकर कॉल कहने से उसके अकेले सामान्य नंबर पर तुरंत कॉल लग सकती है। कॉल शुल्क लग सकता है।</string>
+    <string name="direct_contact_calls_enable">सीधी कॉल चालू करें</string>
+    <string name="direct_contact_calls_denied">सीधी कॉल बंद है। इसे इस्तेमाल करने के लिए Ash की ऐप अनुमतियों में संपर्क और फ़ोन की अनुमति दें।</string>
     <string name="memories">यादें</string>
     <string name="mode_auto">अपने-आप</string>
     <string name="mode_online">ऑनलाइन</string>

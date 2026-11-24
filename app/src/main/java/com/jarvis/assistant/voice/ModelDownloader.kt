@@ -83,10 +83,18 @@ object ModelDownloader {
     /** Unpacks [file] into [target], dropping the archive's top-level folder. */
     internal fun unpack(file: File, target: File, open: (InputStream) -> ArchiveInputStream<*>) {
         // Unpack next to the target, then swap in, so a failed unpack never leaves a half-installed model.
-        val staging = File(target.parentFile, target.name + ".new").apply { deleteRecursively(); mkdirs() }
+        val previous = File(target.parentFile, target.name + ".previous")
+        if (previous.exists()) {
+            // Recover a swap interrupted by process death before attempting a new download install.
+            if (target.exists()) {
+                if (!previous.deleteRecursively()) throw IOException("Could not clear previous model")
+            } else if (!previous.renameTo(target)) throw IOException("Could not restore previous model")
+        }
+        val staging = File(target.parentFile, target.name + ".new")
+        if (!staging.deleteRecursively() || !staging.mkdirs()) throw IOException("Could not stage model")
         val root = staging.canonicalPath + File.separator
         try {
-            open(file.inputStream()).use { archive ->
+            file.inputStream().use { input -> open(input).use { archive ->
                 while (true) {
                     val entry = archive.nextEntry ?: break
                     // Strip the archive's top-level folder.
@@ -100,9 +108,13 @@ object ModelDownloader {
                         file.outputStream().use { archive.copyTo(it) }
                     }
                 }
+            } }
+            if (target.exists() && !target.renameTo(previous)) throw IOException("Could not retain installed model")
+            if (!staging.renameTo(target)) {
+                if (previous.exists() && !previous.renameTo(target)) throw IOException("Model restore pending")
+                throw IOException("Could not install model")
             }
-            target.deleteRecursively()
-            if (!staging.renameTo(target)) throw IOException("Could not install model")
+            previous.deleteRecursively()
         } finally {
             staging.deleteRecursively()
         }

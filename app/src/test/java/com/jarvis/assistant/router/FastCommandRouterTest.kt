@@ -198,7 +198,11 @@ class FastCommandRouterTest {
         assertNull(p("write me a poem about the sea"))
         assertNull(p("who are you"))
         assertNull(p("open youtube and then search for lofi music and play the first video that you see"))
-        assertNull(p("open youtube and search for cats"))
+        assertEquals(FastCommand.YouTubeSearch("cats"), p("open youtube and search for cats"))
+        assertEquals(FastCommand.YouTubeSearch("kotlin tutorials"), p("open YouTube and search for Kotlin tutorials"))
+        assertEquals(FastCommand.ClearText, p("clear text"))
+        assertEquals(FastCommand.SubmitSearch, p("submit search"))
+        assertEquals(FastCommand.OpenWebsite("example.com"), p("open example.com"))
         assertNull(p(""))
     }
 
