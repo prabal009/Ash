@@ -27,7 +27,10 @@ import com.jarvis.assistant.R
 import com.jarvis.assistant.assistant.AshRecognitionService
 import com.jarvis.assistant.audio.AudioRouteController
 import com.jarvis.assistant.audio.AudioRouteListener
+import com.jarvis.assistant.audio.BluetoothAudioRouteController
 import com.jarvis.assistant.audio.BuiltInPhoneAudioRouteController
+import com.jarvis.assistant.audio.OutputRouteKind
+import com.jarvis.assistant.audio.RouteDisconnectReason
 import com.jarvis.assistant.audio.RouteTrigger
 import com.jarvis.assistant.accessibility.JarvisAccessibilityService
 import com.jarvis.assistant.Settings
@@ -168,6 +171,7 @@ class JarvisService : Service() {
         // Promote before opening audio or loading any native models.
         settings = Settings(this)
         audioRoutes = audioRouteControllerFactory(applicationContext)
+        audioRoutes.updateSettings(settings.bluetoothMicEnabled, settings.headsetButtonFallback)
         AudioOut.routeController = audioRoutes
         speaker = Speaker(this)
         voice = VoiceInput(this, audioRoutes) { onWakeWord() }
@@ -206,7 +210,30 @@ class JarvisService : Service() {
             override fun onRouteTrigger(trigger: RouteTrigger) {
                 main.post {
                     if (!destroyed && state == State.IDLE && pendingAnswer == null) {
-                        onWakeWord(fromKeyword = false)
+                        onWakeWord(fromKeyword = false, preferHeadset = true)
+                    }
+                }
+            }
+
+            override fun onActiveInputLost(reason: RouteDisconnectReason) {
+                main.post {
+                    if (!destroyed && (state == State.LISTENING_COMMAND || pendingAnswer != null)) {
+                        val message = when (reason) {
+                            RouteDisconnectReason.BLUETOOTH_DISCONNECTED -> "Bluetooth headset disconnected."
+                            RouteDisconnectReason.BLUETOOTH_DISABLED -> "Bluetooth turned off."
+                            RouteDisconnectReason.SCO_DROPPED -> "Bluetooth microphone closed."
+                            RouteDisconnectReason.WIRED_UNPLUGGED -> "Headset unplugged."
+                            else -> "Microphone route interrupted."
+                        }
+                        cancelVoiceTurn(message)
+                    }
+                }
+            }
+
+            override fun onPrivateOutputLost(reason: RouteDisconnectReason) {
+                main.post {
+                    if (!destroyed && captureState == VoiceState.SPEAKING) {
+                        cancelVoiceTurn("Headset disconnected. Reply paused.")
                     }
                 }
             }
@@ -255,6 +282,7 @@ class JarvisService : Service() {
             ACTION_WAKE_SETTINGS -> {
                 voice.customWakePhrase = settings.customWakePhrase
                 voice.wakeEnabled = standby && settings.wakeWordEnabled
+                audioRoutes.updateSettings(settings.bluetoothMicEnabled, settings.headsetButtonFallback)
                 if (!settings.wakeWordEnabled) {
                     standby = false
                     settings.switchedOn = false
@@ -345,6 +373,16 @@ class JarvisService : Service() {
         state = State.IDLE
         island { it.hide() }
         update(message)
+        if (::audioRoutes.isInitialized && audioRoutes.ownsCommunicationRoute) {
+            // Stop the SCO/BLE AudioRecord before releasing the communication route so VoiceInput
+            // does not see a spurious route-drop interruption.
+            voice.stop {
+                audioRoutes.releaseSession()
+                if (!destroyed && resume) resumeListening()
+            }
+            return
+        }
+        if (::audioRoutes.isInitialized) audioRoutes.releaseSession()
         if (resume) resumeListening()
     }
 
@@ -418,27 +456,43 @@ class JarvisService : Service() {
     ) {
         val id = ++speechId
         captureState = VoiceState.SPEAKING
-        val bargeIn = interruptible && settings.interruptByTalking && voice.canTranscribe && voice.isListening
-        if (bargeIn) voice.listenWhileSpeaking(text) { stop -> onBargeIn(stop) } else voice.muted = true
-        afterSpeech = {
-            voice.stopListeningWhileSpeaking()
-            // After muted speech, let the speaker's echo die away before listening again.
-            main.postDelayed({
-                if (!destroyed && id == speechId) {
-                    voice.muted = false
-                    then()
+        fun prepareAndSpeak() {
+            if (destroyed || id != speechId) return
+            audioRoutes.prepareOutputForSpeech { policy ->
+                if (destroyed || id != speechId) return@prepareOutputForSpeech
+                AudioOut.applyOutputPolicy(policy)
+                val btOutput = policy.expectedKind == OutputRouteKind.BLUETOOTH_A2DP ||
+                    policy.expectedKind == OutputRouteKind.BLE_AUDIO
+                val bargeIn = interruptible && settings.interruptByTalking && !btOutput &&
+                    !audioRoutes.ownsCommunicationRoute && voice.canTranscribe && voice.isListening
+                if (bargeIn) voice.listenWhileSpeaking(text) { stop -> onBargeIn(stop) } else voice.muted = true
+                afterSpeech = {
+                    voice.stopListeningWhileSpeaking()
+                    // After muted speech, let the speaker's echo die away before listening again.
+                    main.postDelayed({
+                        if (!destroyed && id == speechId) {
+                            voice.muted = false
+                            then()
+                        }
+                    }, if (bargeIn) 0L else 150L)
                 }
-            }, if (bargeIn) 0L else 150L)
-        }
-        island { it.speaking(text) { speaker.level() } }
-        speaker.speak(text, onSkipped = {
-            if (id == speechId && !destroyed) {
-                if (onSkipped == null) finishSpeech() else {
-                    interruptSpeech()
-                    onSkipped()
-                }
+                island { it.speaking(text) { speaker.level() } }
+                speaker.speak(text, onSkipped = {
+                    if (id == speechId && !destroyed) {
+                        if (onSkipped == null) finishSpeech() else {
+                            interruptSpeech()
+                            onSkipped()
+                        }
+                    }
+                }) { if (id == speechId) finishSpeech() }
             }
-        }) { if (id == speechId) finishSpeech() }
+        }
+        if (audioRoutes.ownsCommunicationRoute && voice.isListening) {
+            // Close the active SCO/BLE AudioRecord before prepareOutputForSpeech tears down SCO.
+            voice.stop { prepareAndSpeak() }
+        } else {
+            prepareAndSpeak()
+        }
     }
 
     private fun finishSpeech() {
@@ -460,21 +514,21 @@ class JarvisService : Service() {
         island { if (it.isShowing) it.speakingDone() }
     }
 
-    private fun onWakeWord(fromKeyword: Boolean = true) {
+    private fun onWakeWord(fromKeyword: Boolean = true, preferHeadset: Boolean = !fromKeyword) {
         if (destroyed || (fromKeyword && !standby) || pendingAnswer != null) return
         if (state != State.LISTENING_COMMAND) trace.begin("wake")
         when (state) {
             State.LISTENING_COMMAND -> return
             State.WORKING -> {
-                // "Hey Jarvis" during a task: listen for the next command, but let the task go on. It is replaced only
+                // "Hey Ash" during a task: listen for the next command, but let the task go on. It is replaced only
                 // when a new command is actually heard, so a stray detection no longer kills a slow request.
                 interruptedWork = board.foreground() != null
                 interruptSpeech()
-                listen(promptIfQuiet = fromKeyword)
+                listen(promptIfQuiet = fromKeyword, preferHeadset = preferHeadset)
             }
             State.IDLE -> {
                 interruptSpeech()
-                listen(promptIfQuiet = fromKeyword)
+                listen(promptIfQuiet = fromKeyword, preferHeadset = preferHeadset)
             }
         }
     }
@@ -503,7 +557,12 @@ class JarvisService : Service() {
      * Transcribes the next thing the user says. After "Hey Jarvis" ([promptIfQuiet]) Jarvis says
      * "Yes?" if they pause; for a [followUp] it waits quietly for a few seconds and gives up silently.
      */
-    private fun listen(promptIfQuiet: Boolean, followUp: Boolean = false, interrupted: Boolean = false) {
+    private fun listen(
+        promptIfQuiet: Boolean,
+        followUp: Boolean = false,
+        interrupted: Boolean = false,
+        preferHeadset: Boolean = false,
+    ) {
         state = State.LISTENING_COMMAND
         captureState = VoiceState.COMMAND_LISTENING
         val request = ++captureRequest
@@ -515,15 +574,36 @@ class JarvisService : Service() {
                 onHeard(text, followUp, interrupted)
             }
         }
-        if (useOfflineAsr) {
-            voice.listenForCommand(if (followUp) FOLLOW_UP_MS else 7000, heard)
-        } else {
-            voice.stop {
-                if (destroyed || request != captureRequest) return@stop
-                if (promptIfQuiet) update("Speak again when ready. The system recognizer starts a new recording.")
-                google.listen(googleLanguage(), offline = settings.aiMode == AiMode.OFFLINE || googleLanguage() == null,
-                    onReady = { if (request == captureRequest) update("Speak now") }, onResult = heard)
+        fun startCapture() {
+            if (destroyed || request != captureRequest || state != State.LISTENING_COMMAND) return
+            if (useOfflineAsr) {
+                voice.listenForCommand(if (followUp) FOLLOW_UP_MS else 7000, heard)
+            } else {
+                voice.stop {
+                    if (destroyed || request != captureRequest) return@stop
+                    if (promptIfQuiet) update("Speak again when ready. The system recognizer starts a new recording.")
+                    google.listen(googleLanguage(), offline = settings.aiMode == AiMode.OFFLINE || googleLanguage() == null,
+                        onReady = { if (request == captureRequest) update("Speak now") }, onResult = heard)
+                }
             }
+        }
+        val tryHeadset = preferHeadset && !followUp && !interrupted &&
+            settings.bluetoothMicEnabled && audioRoutes.currentSnapshot().bluetoothMicAvailable
+        if (tryHeadset) {
+            // Stop the standby phone recorder before opening a headset communication link.
+            voice.stop {
+                if (destroyed || request != captureRequest || state != State.LISTENING_COMMAND) return@stop
+                audioRoutes.prepareCommandInput(preferHeadset = true) { _, usedFallback ->
+                    if (destroyed || request != captureRequest || state != State.LISTENING_COMMAND) {
+                        audioRoutes.releaseSession()
+                        return@prepareCommandInput
+                    }
+                    if (usedFallback) update("Listening (phone mic)…")
+                    startCapture()
+                }
+            }
+        } else {
+            startCapture()
         }
     }
 
@@ -1057,6 +1137,15 @@ class JarvisService : Service() {
     private fun resumeListening() {
         if (destroyed || state != State.IDLE) return
         invocation = 0
+        if (audioRoutes.ownsCommunicationRoute) {
+            // Stop the headset AudioRecord first, then release SCO/BLE before returning to standby.
+            voice.stop {
+                audioRoutes.releaseSession()
+                resumeListening()
+            }
+            return
+        }
+        audioRoutes.releaseSession()
         if (!standby || !settings.wakeWordEnabled || !notificationsAvailable(this)) {
             captureState = VoiceState.DISABLED
             voice.wakeEnabled = false
@@ -1251,9 +1340,11 @@ class JarvisService : Service() {
 
         /**
          * Phase 4 Bluetooth integration seam: supplies the [AudioRouteController] used by
-         * [JarvisService], [VoiceInput], and [AudioOut]. Defaults to [BuiltInPhoneAudioRouteController].
+         * [JarvisService], [VoiceInput], and [AudioOut]. Defaults to [BluetoothAudioRouteController].
          */
-        @Volatile var audioRouteControllerFactory: (Context) -> AudioRouteController = { BuiltInPhoneAudioRouteController }
+        @Volatile var audioRouteControllerFactory: (Context) -> AudioRouteController = { ctx ->
+            BluetoothAudioRouteController(ctx)
+        }
 
         /** Set by the visible activity to mirror status changes. Called on the main thread. */
         var statusListener: ((String) -> Unit)? = null

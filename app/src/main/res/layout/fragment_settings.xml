@@ -315,6 +315,38 @@
                     android:textColor="@color/text_dim"
                     android:textSize="12sp"
                     tools:ignore="HardcodedText" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/btMicSwitch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/ash_bt_mic"
+                    android:textColor="@color/text" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="64dp"
+                    android:text="@string/ash_bt_mic_hint"
+                    android:textColor="@color/text_dim"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/headsetButtonSwitch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/ash_headset_button"
+                    android:textColor="@color/text" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="64dp"
+                    android:text="@string/ash_headset_button_hint"
+                    android:textColor="@color/text_dim"
+                    android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

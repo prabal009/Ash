@@ -21,4 +21,8 @@
     <string name="ash_media_access_note">Android grants notification access to allow Ash to find and control supported media players. Ash does not read notification contents.</string>
     <string name="ash_credentials_unavailable">Secure storage is unavailable. Unlock your phone and try again; the key was not saved.</string>
     <string name="ash_provider_check_failed">Connection failed. Check the provider URL, credentials and network.</string>
+    <string name="ash_bt_mic">Use Bluetooth earbud mic</string>
+    <string name="ash_bt_mic_hint">Uses a connected Bluetooth headset microphone during voice commands and returns to hi-fi playback for replies. Standby wake detection uses the phone microphone.</string>
+    <string name="ash_headset_button">Headset button fallback</string>
+    <string name="ash_headset_button_hint">Optional for earbuds without a digital-assistant gesture. Only active while no music is playing; never hijacks active playback.</string>
 </resources>

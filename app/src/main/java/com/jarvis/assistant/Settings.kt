@@ -335,6 +335,16 @@ class Settings internal constructor(context: Context, private val credentials: P
         get() = prefs.getBoolean("follow_up", true)
         set(v) = prefs.edit().putBoolean("follow_up", v).apply()
 
+    /** Prefer a connected Bluetooth earbud microphone for active voice turns when available. */
+    var bluetoothMicEnabled: Boolean
+        get() = prefs.getBoolean("bt_mic_enabled", true)
+        set(v) = prefs.edit().putBoolean("bt_mic_enabled", v).apply()
+
+    /** Optional headset-button fallback for earbuds without an OS assistant gesture; yields to playing music. */
+    var headsetButtonFallback: Boolean
+        get() = prefs.getBoolean("headset_button_fallback", false)
+        set(v) = prefs.edit().putBoolean("headset_button_fallback", v).apply()
+
     // ---- Assistant behaviour ----
 
     /** AUTO, ONLINE or OFFLINE. Controls which model answers; simple phone actions never use a model. */

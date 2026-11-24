@@ -1,9 +1,13 @@
 package com.jarvis.assistant.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
+import androidx.core.content.ContextCompat
 import com.jarvis.assistant.R
 import com.jarvis.assistant.service.JarvisService
 import com.jarvis.assistant.voice.WakePhrase
@@ -80,6 +84,21 @@ class SettingsFragment : Fragment() {
         ui.bargeSwitch.setOnCheckedChangeListener { _, v -> settings.interruptByTalking = v }
         ui.followUpSwitch.isChecked = settings.followUp
         ui.followUpSwitch.setOnCheckedChangeListener { _, v -> settings.followUp = v }
+        ui.btMicSwitch.isChecked = settings.bluetoothMicEnabled
+        ui.btMicSwitch.setOnCheckedChangeListener { _, enabled ->
+            settings.bluetoothMicEnabled = enabled
+            if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+            ) {
+                activity.requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 2)
+            }
+            if (JarvisService.running) JarvisService.start(activity, JarvisService.ACTION_WAKE_SETTINGS)
+        }
+        ui.headsetButtonSwitch.isChecked = settings.headsetButtonFallback
+        ui.headsetButtonSwitch.setOnCheckedChangeListener { _, enabled ->
+            settings.headsetButtonFallback = enabled
+            if (JarvisService.running) JarvisService.start(activity, JarvisService.ACTION_WAKE_SETTINGS)
+        }
 
 
         // Permissions

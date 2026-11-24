@@ -418,10 +418,10 @@ class VoiceInput(
     private fun hasMicPermission() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
         PackageManager.PERMISSION_GRANTED
 
-    private fun micBlocked(audio: AudioManager): Boolean = audio.isMicrophoneMute ||
+    internal fun micBlocked(audio: AudioManager): Boolean = audio.isMicrophoneMute ||
         audio.mode == AudioManager.MODE_IN_CALL ||
-        audio.mode == AudioManager.MODE_IN_COMMUNICATION ||
-        audio.mode == AudioManager.MODE_RINGTONE
+        audio.mode == AudioManager.MODE_RINGTONE ||
+        (audio.mode == AudioManager.MODE_IN_COMMUNICATION && !routeController.ownsCommunicationRoute)
 
     private fun runMic(owner: Capture): MicExit {
         if (!hasMicPermission()) return MicExit.PERMISSION

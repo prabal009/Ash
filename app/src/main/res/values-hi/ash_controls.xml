@@ -20,4 +20,8 @@
     <string name="ash_media_access_note">समर्थित मीडिया प्लेयर ढूँढने और नियंत्रित करने के लिए Android, Ash को सूचनाओं की अनुमति देता है। Ash सूचनाओं की सामग्री नहीं पढ़ता।</string>
     <string name="ash_credentials_unavailable">सुरक्षित स्टोरेज उपलब्ध नहीं है। फ़ोन अनलॉक करके फिर कोशिश करें; कुंजी सहेजी नहीं गई।</string>
     <string name="ash_provider_check_failed">कनेक्शन नहीं हुआ। प्रदाता का URL, कुंजी और नेटवर्क जाँचें।</string>
+    <string name="ash_bt_mic">ब्लूटूथ ईयरबड माइक इस्तेमाल करें</string>
+    <string name="ash_bt_mic_hint">कमांड सुनते समय कनेक्टेड ब्लूटूथ हेडसेट माइक का उपयोग करता है और जवाब के लिए सामान्य ऑडियो पर लौटता है। स्टैंडबाय पहचान फ़ोन माइक से होती है।</string>
+    <string name="ash_headset_button">हेडसेट बटन फ़ॉलबैक</string>
+    <string name="ash_headset_button_hint">बिना डिजिटल असिस्टेंट जेस्चर वाले ईयरबड्स के लिए वैकल्पिक। केवल तब काम करता है जब कोई संगीत न चल रहा हो।</string>
 </resources>

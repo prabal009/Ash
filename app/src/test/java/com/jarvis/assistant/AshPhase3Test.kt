@@ -58,9 +58,11 @@ import org.robolectric.shadows.ShadowLooper
 class AshPhase3Test {
     private val ctx: Context = ApplicationProvider.getApplicationContext()
 
+    private val originalRouteFactory = JarvisService.audioRouteControllerFactory
+
     @After
     fun tearDown() {
-        JarvisService.audioRouteControllerFactory = { BuiltInPhoneAudioRouteController }
+        JarvisService.audioRouteControllerFactory = originalRouteFactory
         AudioOut.routeController = BuiltInPhoneAudioRouteController
     }
 

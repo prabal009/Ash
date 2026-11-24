@@ -21,10 +21,20 @@
 - [x] Write `docs/ash/02-implementation-status.md` with recovery evidence and Phase 4 handoff
 - [ ] Qualify screen-off/Doze, human voices, assistant gesture and recognition lifecycle, actual player transport, restricted settings, and battery on physical phones
 
-## Phase 4+: Bluetooth & Future Backlog
+## Phase 4: Bluetooth Earbud Integration
+
+- [x] Inspect repository, docs (`00`, `01`, `02`), and Yunto native Kotlin headset source (`HeadphoneButtonModule.kt`, `HeadphoneButtonService.kt`)
+- [x] Create dedicated feature branch `phase4-bluetooth-integration`
+- [x] Implement native Kotlin `BluetoothAudioRouteController`, `AudioSystemGateway`, and opt-in `HeadsetButtonBridge` (with MIT attribution in `THIRD_PARTY_NOTICES.md`)
+- [x] Wire Phase 4 permissions (`MODIFY_AUDIO_SETTINGS`, `BLUETOOTH` maxSdk 30, `BLUETOOTH_CONNECT`), `VoiceInput` Ash-owned communication mode check, `AudioOut` live preferred output updates, `JarvisService` turn-scoped negotiation/teardown/private-output-stop, and Settings UI switches
+- [x] Run comprehensive Phase 4 Bluetooth & audio routing unit tests (all 14 scenarios), full `:app:testDebugUnitTest` (42 suites, 274 tests passed), `:app:lintDebug` (0 errors, 33 warnings), `:app:assembleDebug`, and `check-apk-abis.py`
+- [x] Write `docs/ash/03-bluetooth-integration.md` with Gemini Hydrogen testing handoff
+- [ ] Qualify Classic HFP/SCO, BLE Audio, A2DP-only, wired/USB, headset-button coexistence, incoming calls, disconnect/reconnect, and screen-off pocket battery on physical Android devices (Gemini Hydrogen handoff)
+
+## Future Backlog
 
 - [x] Restore Android SDK 35 / JDK 21 and verify `testDebugUnitTest` and `lintDebug` baseline
 - [ ] Remove dead legacy subsystems (`agent/FastCommandRouter.kt`, `agent/LocalServerManager.kt`, `memory/MemoryManager.kt`, `memory/JarvisDatabaseHelper.kt`, `claude-delivery/`)
-- [ ] Build native Audio/Bluetooth coordinator (`setCommunicationDevice` SCO + BLE Audio, `AudioDeviceCallback`, per-turn `AudioFocusRequest`, `AudioRecord` routing) adapted cleanly from Yunto without Expo/RN
-- [ ] Requalify default-assistant and music coexistence after Bluetooth route changes; no always-on `MediaSession`
+- [x] Build native Audio/Bluetooth coordinator (`setCommunicationDevice` SCO + BLE Audio, `AudioDeviceCallback`, per-turn `AudioFocusRequest`, `AudioRecord` routing) adapted cleanly from Yunto without Expo/RN
+- [ ] Requalify default-assistant and music coexistence on physical hardware after Bluetooth route changes; no always-on `MediaSession`
 - [ ] Revisit platform-level cleartext configuration separately from the provider-level HTTPS/local-HTTP enforcement already in Phase 3

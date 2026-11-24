@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.SystemClock
 import com.jarvis.assistant.audio.AudioRouteController
 import com.jarvis.assistant.audio.BuiltInPhoneAudioRouteController
+import com.jarvis.assistant.audio.OutputRoutePolicy
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.sqrt
@@ -153,8 +154,18 @@ object AudioOut {
         }
     }
 
+    /** Applies an updated output route policy to any live AudioTrack immediately. */
+    @Synchronized
+    fun applyOutputPolicy(policy: OutputRoutePolicy) {
+        track?.let { runCatching { it.setPreferredDevice(policy.preferredDevice) } }
+    }
+
     private fun audioTrack(): AudioTrack {
-        track?.let { return it }
+        val preferred = routeController.prepareOutput().preferredDevice
+        track?.let { existing ->
+            runCatching { existing.setPreferredDevice(preferred) }
+            return existing
+        }
         val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
         val t = AudioTrack.Builder()
             .setAudioAttributes(assistantSpeechAttributes)
@@ -170,7 +181,7 @@ object AudioOut {
             .build()
         // Start playing as soon as there is any audio, so short clips like "Yes?" aren't held back.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) runCatching { t.setStartThresholdInFrames(256) }
-        routeController.prepareOutput().preferredDevice?.let { runCatching { t.setPreferredDevice(it) } }
+        runCatching { t.setPreferredDevice(preferred) }
         track = t
         return t
     }
