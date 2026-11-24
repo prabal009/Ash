@@ -31,6 +31,16 @@
 - [x] Write `docs/ash/03-bluetooth-integration.md` with Gemini Hydrogen testing handoff
 - [ ] Qualify Classic HFP/SCO, BLE Audio, A2DP-only, wired/USB, headset-button coexistence, incoming calls, disconnect/reconnect, and screen-off pocket battery on physical Android devices (Gemini Hydrogen handoff)
 
+## Phase 5: Testing, Build Verification & Optimization
+
+- [x] Verify repository state, `phase4-bluetooth-integration` (`92e984a`), and all prior reports (`00`–`03`)
+- [x] Verify build, static analysis, and APKs (`:app:lintDebug` 0 errors/33 warnings, `:app:assembleDebug` 4 APKs, `check-apk-abis.py debug` PASS)
+- [x] Run full host unit test suite (`:app:testDebugUnitTest --rerun-tasks`: 42 suites, 274 tests, 0 failures, 0 errors, 0 skipped)
+- [x] Run native `sherpa-onnx` wake-word & barge-in tests (`-Preal` 11 `RealEngineTest` scenarios: 10 passed, 1 failed — `saysSorryWhenNothingFollowsTheWakeWord` / `HEY_ASH` voice 5 recall)
+- [x] Audit security, permissions, logging, listener cleanup, and lifecycle/concurrency safety
+- [x] Write `docs/ash/04-test-report.md` with ADB physical-device procedure and Gemini Argon handoff
+- [ ] Execute physical-device ADB test matrix (no Android device or instrumentation suite attached during Phase 5)
+
 ## Future Backlog
 
 - [x] Restore Android SDK 35 / JDK 21 and verify `testDebugUnitTest` and `lintDebug` baseline
