@@ -60,6 +60,14 @@ class SentenceChunkerTest {
         assertEquals(SseParser.Event.Done, SseParser.parseLine("data: [DONE]"))
         assertEquals(SseParser.Event.Other, SseParser.parseLine("""data: {"choices":[{"delta":{"content":null}}]}"""))
         assertEquals(SseParser.Event.Other, SseParser.parseLine("""data: {"choices":[{"delta":{}}]}"""))
+        assertEquals(
+            SseParser.Event.Text("Quick English reply."),
+            SseParser.parseLine("""data: {"choices":[{"delta":{"reasoning":"check \"content\" field first","content":"Quick English reply."}}]}"""),
+        )
+        assertEquals(
+            SseParser.Event.Other,
+            SseParser.parseLine("""data: {"choices":[{"delta":{"reasoning":"internal thought with \"content\":\"fake\" inside","content":null}}]}"""),
+        )
         assertEquals(SseParser.Event.Other, SseParser.parseLine(": keep-alive"))
         assertEquals(SseParser.Event.Other, SseParser.parseLine(""))
     }

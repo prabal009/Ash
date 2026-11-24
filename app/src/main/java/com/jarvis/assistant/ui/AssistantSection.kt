@@ -1,11 +1,15 @@
 package com.jarvis.assistant.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import android.widget.Toast
+import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.chip.ChipGroup
 import com.google.android.material.materialswitch.MaterialSwitch
@@ -63,8 +67,19 @@ object AssistantSection {
             isChecked = settings.localServerAutoStart
             setOnCheckedChangeListener { _, checked -> settings.localServerAutoStart = checked }
         }
-        view.findViewById<MaterialButton>(R.id.permissionsButton).setOnClickListener {
-            context.startActivity(PermissionActivity.intent(context))
+        val permissionsButton = view.findViewById<MaterialButton>(R.id.permissionsButton)
+        fun refreshContactsButton() {
+            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+            permissionsButton.setText(if (granted) R.string.contacts_allowed else R.string.allow_contacts)
+        }
+        refreshContactsButton()
+        permissionsButton.setOnClickListener {
+            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                Toast.makeText(context, R.string.contacts_already_allowed, Toast.LENGTH_LONG).show()
+            } else {
+                context.startActivity(PermissionActivity.intent(context))
+            }
         }
         view.findViewById<MaterialButton>(R.id.memoriesButton).setOnClickListener {
             context.startActivity(Intent(context, MemoryActivity::class.java))
@@ -103,7 +118,11 @@ object AssistantSection {
         })
 
         val status = view.findViewById<TextView>(R.id.localStatus)
-        return { refreshStatus(context, settings, view, status); showRuntime(runtime, runtimeStatus, runtimeButton) }
+        return {
+            refreshContactsButton()
+            refreshStatus(context, settings, view, status)
+            showRuntime(runtime, runtimeStatus, runtimeButton)
+        }
     }
 
     private fun showRuntime(rt: EmbeddedRuntime, text: TextView, button: MaterialButton) {

@@ -44,7 +44,7 @@ object WakeModel {
     const val JOINER = "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
     val KEEP_FILES = setOf(ENCODER, DECODER, JOINER, "tokens.txt")
     /** SentencePiece rows from this transducer's GigaSpeech vocabulary. */
-    const val KEYWORDS = "▁HE Y ▁A SH :2.9 #0.055 @HEY_ASH\n▁HE LL O ▁A SH :2.0 #0.1 @HELLO_ASH\n"
+    const val KEYWORDS = "▁HE Y ▁A SH :3.0 #0.045 @HEY_ASH\n▁HE LL O ▁A SH :2.2 #0.08 @HELLO_ASH\n"
     /** An optional interruption while Ash is speaking. */
     const val STOP_KEYWORD = "▁ST O P :2.0 #0.15 @STOP"
     fun dir(context: Context) = File(context.filesDir, "kws")
@@ -220,7 +220,7 @@ class VoiceInput(
             enableEndpoint = true,
             endpointConfig = EndpointConfig(
                 rule1 = EndpointRule(false, 2.4f, 0f),
-                rule2 = EndpointRule(true, 1.2f, 0f),
+                rule2 = EndpointRule(true, 1.4f, 0f),
                 rule3 = EndpointRule(false, 0f, 20f),
             ),
         ))
@@ -465,6 +465,7 @@ class VoiceInput(
             var badReads = 0
             var silentBlocks = 0
             var noRouteBlocks = 0
+            var policyCheckBlocks = 0
             var route: Int? = null
             var aecEnabled = false
             micGain = MicGain()
@@ -472,7 +473,7 @@ class VoiceInput(
                 val n = input.read(pcm, buffered, CHUNK - buffered)
                 if (owner.closing) return MicExit.STOPPED
                 if (!hasMicPermission()) return MicExit.PERMISSION
-                if (silenced.get() || micBlocked(audio)) return MicExit.INTERRUPTED
+                if (silenced.get()) return MicExit.INTERRUPTED
                 if (n <= 0) {
                     if (n == AudioRecord.ERROR_DEAD_OBJECT || ++badReads >= MAX_READ_ERRORS) return MicExit.FAILED
                     Thread.sleep(20)
@@ -483,18 +484,23 @@ class VoiceInput(
                 if (buffered < CHUNK) continue
                 buffered = 0
                 if (input.recordingState != AudioRecord.RECORDSTATE_RECORDING) return MicExit.FAILED
-                val purpose = if (request != null) AudioRoutePurpose.COMMAND_CAPTURE else AudioRoutePurpose.WAKE_STANDBY
-                val actual = routedDeviceOf(input)
-                if (actual == null) {
-                    if (route != null) return MicExit.INTERRUPTED
-                    if (++noRouteBlocks >= MAX_NO_ROUTE_BLOCKS) return MicExit.UNAVAILABLE
-                    continue
+                // Poll AudioManager/routedDevice every 500 ms instead of every 100 ms to avoid 30/s Binder IPC spam.
+                val shouldCheckPolicy = route == null || policyCheckBlocks++ % POLICY_POLL_INTERVAL_BLOCKS == 0
+                if (shouldCheckPolicy) {
+                    if (micBlocked(audio)) return MicExit.INTERRUPTED
+                    val purpose = if (request != null) AudioRoutePurpose.COMMAND_CAPTURE else AudioRoutePurpose.WAKE_STANDBY
+                    val actual = routedDeviceOf(input)
+                    if (actual == null) {
+                        if (route != null) return MicExit.INTERRUPTED
+                        if (++noRouteBlocks >= MAX_NO_ROUTE_BLOCKS) return MicExit.UNAVAILABLE
+                        continue
+                    }
+                    if (!routeController.acceptInputDevice(actual, purpose)) {
+                        return if (route == null) MicExit.UNAVAILABLE else MicExit.INTERRUPTED
+                    }
+                    // If the platform switches between two valid accepted mics, adopt it seamlessly instead of dropping standby.
+                    route = actual.id
                 }
-                if (!routeController.acceptInputDevice(actual, purpose)) {
-                    return if (route == null) MicExit.UNAVAILABLE else MicExit.INTERRUPTED
-                }
-                if (route != null && route != actual.id) return MicExit.INTERRUPTED
-                route = actual.id
                 if (isDigitalSilence(pcm)) {
                     if (++silentBlocks >= SILENT_BLOCKS) return MicExit.SILENT
                 } else {
@@ -644,7 +650,7 @@ class VoiceInput(
                 else MicGain.rms(samples)
             val boosted = raw * gain
             level = (boosted * 8).coerceAtMost(1f)
-            val voiced = boosted > maxOf(MIN_SPEECH_LEVEL, gainControl.noiseFloor * gain * 3)
+            val voiced = boosted > maxOf(MIN_SPEECH_LEVEL, gainControl.noiseFloor * gain * 2.2f)
             if (voiced && (command != null || handoff != null)) speechSinceWake = true
             if (command != null) {
                 val asr = checkNotNull(recognizer)
@@ -869,8 +875,9 @@ class VoiceInput(
         private const val TAG = "VoiceInput"
         @Volatile internal var routedDeviceOf: (AudioRecord) -> AudioDeviceInfo? = AudioRecord::getRoutedDevice
         const val SAMPLE_RATE = 16000
-        private const val END_OF_SPEECH_MS = 1300L
+        private const val END_OF_SPEECH_MS = 1500L
         private const val MAX_READ_ERRORS = 10
+        private const val POLICY_POLL_INTERVAL_BLOCKS = 5
         private const val CHUNK = SAMPLE_RATE / 10
         // Pinned Zipformer KWS: 32 10-ms input frames per chunk, subsampled by four.
         private const val KWS_CHUNK_FRAMES = 8L
@@ -944,16 +951,16 @@ class VoiceInput(
         }
 
         private const val PREFIX_SEPARATOR = "[\\s,.!?;:…—–]"
-        private val WAKE_TAIL_ARTIFACTS = setOf("ash", "as", "asked")
+        private val WAKE_TAIL_ARTIFACTS = setOf("ash", "as", "asked", "hash", "aish", "esh", "ish")
 
         private fun prefixPattern(phrase: String): Regex? {
             if (phrase.isBlank()) return null
             val normalized = WakePhrase.normalize(phrase)
             if (normalized.equals(WakePhrase.DEFAULT, ignoreCase = true)) {
-                return Regex("^hey$PREFIX_SEPARATOR+(?:ash|asked)(?:$PREFIX_SEPARATOR+|$)", RegexOption.IGNORE_CASE)
+                return Regex("^hey$PREFIX_SEPARATOR+(?:ash|as|asked|hash|aish|esh|ish)(?:$PREFIX_SEPARATOR+|$)", RegexOption.IGNORE_CASE)
             }
             if (normalized.equals(WakePhrase.ALTERNATE, ignoreCase = true)) {
-                return Regex("^hello$PREFIX_SEPARATOR+(?:ash|asked)(?:$PREFIX_SEPARATOR+|$)", RegexOption.IGNORE_CASE)
+                return Regex("^hello$PREFIX_SEPARATOR+(?:ash|as|asked|hash|aish|esh|ish)(?:$PREFIX_SEPARATOR+|$)", RegexOption.IGNORE_CASE)
             }
             val prefix = normalized.split(' ')
                 .joinToString("$PREFIX_SEPARATOR+") { Regex.escape(it) }

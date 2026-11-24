@@ -233,6 +233,7 @@ class PhoneAgent(
             Use scroll or swipe to move the screen (element_id is optional). Use press_key for back/home/recents/notifications/quick_settings and open_app to launch installed apps.
             Use read_text to read an observed element to the person. Do not select content unrelated to the task.
             Never try to bypass a refusal or to operate a protected or password screen.
+            Always reply to the user in clear, concise English only.
             When the goal is achieved or the user must take over, call finish.
         """.trimIndent()
 

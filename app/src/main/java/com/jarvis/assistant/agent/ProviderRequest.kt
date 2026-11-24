@@ -85,7 +85,7 @@ internal class ProviderRequest(url: String, withTools: Boolean) {
             OkHttpClient.Builder()
                 .followRedirects(false)
                 .followSslRedirects(false)
-                .retryOnConnectionFailure(false)
+                .retryOnConnectionFailure(true)
                 .build()
         }
         val LOCAL: OkHttpClient by lazy { REMOTE.newBuilder().configureLocalTransport().build() }

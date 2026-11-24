@@ -600,9 +600,11 @@ class FastActionExecutor(
             else -> match.matches.single()
         }
         val numbers = contact.numbers
+        val defaultPrimary = if (settings.directContactCalls && numbers.size > 1) numbers.singleOrNull { it.primary } else null
         val number = when {
             numbers.isEmpty() -> return Result(true, false, "${contact.name} has no saved number.")
             numbers.size == 1 -> numbers.single()
+            defaultPrimary != null -> defaultPrimary
             asker == null || numbers.size > MAX_CHOICES -> return Result(true, false, "${contact.name} has several numbers. Select one in the Phone app.")
             else -> {
                 check()

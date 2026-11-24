@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import com.jarvis.assistant.accessibility.WindowContext
+import com.jarvis.assistant.agent.OpenAiCompatibleSession
 import com.jarvis.assistant.agent.PhoneAgent
 import com.jarvis.assistant.agent.ToolCall
 import com.jarvis.assistant.audio.AudioEndpoint
@@ -27,9 +28,12 @@ import com.jarvis.assistant.router.FastCommand
 import com.jarvis.assistant.router.MediaAction
 import com.jarvis.assistant.router.QueryKind
 import com.jarvis.assistant.router.VolumeChange
+import com.jarvis.assistant.service.JarvisService
 import com.jarvis.assistant.service.LockedCommands
 import com.jarvis.assistant.service.PendingUnlock
 import com.jarvis.assistant.service.TurnInputRoute
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -132,6 +136,43 @@ class EndToEndPhase7Test {
             "raw coordinate tap_point remains rejected",
             PhoneAgent.parse(ToolCall("2", "tap_point", JSONObject().put("observation_id", 2).put("x", 100).put("y", 200)), 2),
         )
+    }
+
+    @Test
+    fun englishPromptAndGroqReasoningModelBudgetAndFallbackWorkCleanly() {
+        val enPrompt = JarvisService.chatPrompt("en")
+        assertTrue("English mode must enforce English-only replies", enPrompt.contains("English only"))
+        assertTrue("English mode must discourage Hindi replies", enPrompt.contains("never reply in Hindi", ignoreCase = true))
+
+        val server = MockWebServer()
+        server.start()
+        try {
+            // 1st response: reasoning-only SSE stream (empty content); 2nd response: non-streamed fallback succeeds cleanly.
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking...\"}}]}\n\ndata: [DONE]\n\n")
+            )
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"<think>check</think>It is sunny today."}}]}""")
+            )
+            val groqPreset = PROVIDERS.first { it.id == "groq" }
+            val cfg = ProviderConfig(groqPreset, server.url("/v1").toString(), "gsk-test", "openai/gpt-oss-120b", "")
+            val session = OpenAiCompatibleSession(cfg, enPrompt, emptyList())
+            val chunks = mutableListOf<String>()
+            val turn = session.send("What is the weather?", emptyList()) { chunks += it }
+
+            assertEquals("It is sunny today.", turn.text)
+            assertEquals(listOf("It is sunny today."), chunks)
+
+            val firstReq = JSONObject(server.takeRequest().body.readUtf8())
+            assertTrue("reasoning model must get >= 1024 tokens", firstReq.getInt("max_tokens") >= 1024)
+            assertEquals("low", firstReq.optString("reasoning_effort"))
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test

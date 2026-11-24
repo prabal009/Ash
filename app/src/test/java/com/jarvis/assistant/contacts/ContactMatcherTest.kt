@@ -30,6 +30,7 @@ class ContactMatcherTest {
 
     @Test fun familyWordsFindTheRightContact() {
         assertEquals(listOf(mummy), ContactMatcher.find("mom", all).matches)
+        assertEquals(listOf(mummy), ContactMatcher.find("my mom", all).matches)
         assertEquals(listOf(mummy), ContactMatcher.find("maa", all).matches)
         assertEquals(listOf(mummy), ContactMatcher.find("mummy", all).matches)
     }
@@ -77,6 +78,11 @@ class ContactMatcherTest {
             listOf(PhoneNumber("98100 00001", "mobile"), PhoneNumber("98100-00001", "work"), PhoneNumber("011 2345", "home"))
         )
         assertEquals(2, dupes.size)
+        val indiaDupes = ContactMatcher.distinctNumbers(
+            listOf(PhoneNumber("98100 00001", "mobile"), PhoneNumber("+91 98100 00001", "mobile"), PhoneNumber("09810000001", "other"))
+        )
+        assertEquals(1, indiaDupes.size)
+        assertEquals("+91 98100 00001", indiaDupes.single().number)
         assertEquals(rahulS.numbers[1], ContactMatcher.pickNumber("home", rahulS.numbers))
         assertEquals(rahulS.numbers[0], ContactMatcher.pickNumber("first", rahulS.numbers))
         assertEquals(rahulS.numbers[1], ContactMatcher.pickNumber("the home number", rahulS.numbers))

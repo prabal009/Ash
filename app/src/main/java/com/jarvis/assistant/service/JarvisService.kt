@@ -15,6 +15,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.media.AudioRecordingConfiguration
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -152,6 +153,8 @@ class JarvisService : Service() {
     private val pendingUnlock = PendingUnlock(SystemClock::elapsedRealtime)
     private var pendingAnswer: (() -> Unit)? = null
     private var micStop: Runnable? = null
+    private var micRecoveryAttempt = 0
+    private var quietCue: Runnable? = null
     private var captureState = VoiceState.DISABLED
     private var audioModeListener: AudioManager.OnModeChangedListener? = null
     private var audioRecordingCallback: AudioManager.AudioRecordingCallback? = null
@@ -355,11 +358,24 @@ class JarvisService : Service() {
     private fun onAudioPolicyChanged() {
         if (destroyed || !standby || state != State.IDLE || captureState != VoiceState.INTERRUPTED) return
         val am = getSystemService(AudioManager::class.java) ?: return
-        if (am.mode == AudioManager.MODE_NORMAL && !am.isMicrophoneMute) {
+        val noOtherRecorder = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            runCatching { am.activeRecordingConfigurations.isEmpty() }.getOrDefault(true)
+        if (am.mode == AudioManager.MODE_NORMAL && !am.isMicrophoneMute && noOtherRecorder) {
             micStop?.let(main::removeCallbacks)
             micStop = null
+            micRecoveryAttempt = 0
             resumeListening()
+        } else {
+            scheduleMicRecovery()
         }
+    }
+
+    private fun scheduleMicRecovery() {
+        if (destroyed || !standby || captureState != VoiceState.INTERRUPTED) return
+        if (micRecoveryAttempt >= MIC_RECOVERY_DELAYS.size) return
+        val delay = MIC_RECOVERY_DELAYS[micRecoveryAttempt++]
+        micStop?.let(main::removeCallbacks)
+        micStop = Runnable { onAudioPolicyChanged() }.also { main.postDelayed(it, delay) }
     }
 
     private fun resumeAfterUnlock() {
@@ -374,6 +390,7 @@ class JarvisService : Service() {
             "ok" -> {
                 micStop?.let(main::removeCallbacks)
                 micStop = null
+                micRecoveryAttempt = 0
                 if (standby && state == State.IDLE && captureState != VoiceState.SPEAKING) {
                     captureState = VoiceState.WAKE_LISTENING
                     update("Listening for ${settings.wakePromptPhrase}")
@@ -383,16 +400,13 @@ class JarvisService : Service() {
                 captureState = VoiceState.INTERRUPTED
                 cancelVoiceTurn("Microphone paused by Android", resume = false)
                 micStop?.let(main::removeCallbacks)
-                micStop = if (!standby) {
-                    Runnable {
+                if (!standby) {
+                    micStop = Runnable {
                         if (!destroyed && captureState == VoiceState.INTERRUPTED) stopSelf()
                     }.also { main.postDelayed(it, 30_000) }
-                } else if (problem == "silent") {
-                    // Single bounded recovery attempt for transient digital silence in armed standby;
-                    // call/recording interruptions recover event-driven via OnModeChangedListener / AudioRecordingCallback.
-                    Runnable { onAudioPolicyChanged() }.also { main.postDelayed(it, 3_000) }
                 } else {
-                    null
+                    // Bounded automatic recovery so transient OnePlus/Android mic interruptions never leave Ash permanently deaf.
+                    scheduleMicRecovery()
                 }
             }
             "retrying" -> {
@@ -400,9 +414,18 @@ class JarvisService : Service() {
                 cancelVoiceTurn("Microphone disconnected. Retrying…", resume = false)
             }
             else -> {
-                captureState = VoiceState.ERROR_RECOVERY
-                cancelVoiceTurn("Microphone unavailable. Open Ash to retry.", resume = false)
-                stopSelf()
+                val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                if (standby && hasMic && (problem == "failed" || problem == "unavailable") &&
+                    micRecoveryAttempt < MIC_RECOVERY_DELAYS.size
+                ) {
+                    captureState = VoiceState.INTERRUPTED
+                    cancelVoiceTurn("Microphone interrupted. Recovering…", resume = false)
+                    scheduleMicRecovery()
+                } else {
+                    captureState = VoiceState.ERROR_RECOVERY
+                    cancelVoiceTurn("Microphone unavailable. Open Ash to retry.", resume = false)
+                    stopSelf()
+                }
             }
         }
     }
@@ -435,6 +458,8 @@ class JarvisService : Service() {
 
     private fun invalidateInput() {
         captureRequest++
+        quietCue?.let(main::removeCallbacks)
+        quietCue = null
         pendingAnswer?.invoke()
         pendingAnswer = null
         google.cancel()
@@ -568,6 +593,8 @@ class JarvisService : Service() {
 
     private fun onWakeWord(fromKeyword: Boolean = true, preferHeadset: Boolean = !fromKeyword) {
         if (destroyed || (fromKeyword && !standby) || pendingAnswer != null) return
+        // Pre-warm Kokoro while the user speaks their command so replies start immediately without a 2–3s cold load.
+        speaker.warmUp()
         if (state != State.LISTENING_COMMAND) trace.begin("wake")
         when (state) {
             State.LISTENING_COMMAND -> return
@@ -629,7 +656,18 @@ class JarvisService : Service() {
         fun startCapture() {
             if (destroyed || request != captureRequest || state != State.LISTENING_COMMAND) return
             if (useOfflineAsr) {
-                voice.listenForCommand(if (followUp) FOLLOW_UP_MS else 7000, heard)
+                voice.listenForCommand(if (followUp) FOLLOW_UP_MS else 8500, heard)
+                if (promptIfQuiet) {
+                    quietCue?.let(main::removeCallbacks)
+                    quietCue = Runnable {
+                        quietCue = null
+                        if (!destroyed && request == captureRequest && state == State.LISTENING_COMMAND &&
+                            !voice.speechSinceWake && voice.partialText.isBlank()
+                        ) {
+                            playWakeChime()
+                        }
+                    }.also { main.postDelayed(it, 400L) }
+                }
             } else {
                 voice.stop {
                     if (destroyed || request != captureRequest) return@stop
@@ -649,6 +687,15 @@ class JarvisService : Service() {
             headsetTurn = routeResult == TurnInputRoute.Result.HEADSET
             if (routeResult == TurnInputRoute.Result.PHONE_FALLBACK) update("Listening (phone mic)…")
             startCapture()
+        }
+    }
+
+    /** Plays a brief, gentle earcon when the user pauses after saying the wake phrase. */
+    private fun playWakeChime() {
+        runCatching {
+            val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 55)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP, 65)
+            main.postDelayed({ runCatching { tone.release() } }, 180L)
         }
     }
 
@@ -747,7 +794,7 @@ class JarvisService : Service() {
                 val memory = aiRouter.memoryContext(task, profile)
                 val message = if (memory.isEmpty()) task else "$memory\n\n$task"
 
-                val session = Llm.newSession(config, CHAT_PROMPT, emptyList())
+                val session = Llm.newSession(config, chatPrompt(settings.speechLanguage), emptyList())
 
                 session.seedHistory(earlier)
                 activeSession = session
@@ -776,7 +823,7 @@ class JarvisService : Service() {
                     continue
                 }
 
-                val reply = turn.text.trim()
+                val reply = com.jarvis.assistant.agent.OpenAiCompatibleSession.stripThinking(turn.text)
                 if (reply.isNotBlank()) {
                     history.step(id, "Received the answer.")
                     aiRouter.report(profile, true)
@@ -1406,11 +1453,23 @@ class JarvisService : Service() {
         /** A repeated command within this time after a failed one can teach Jarvis the first (mis-heard) name. */
         private const val RETRY_LEARN_MS = 20_000L
         private const val TRIM_RUNNING_CRITICAL = 15 // ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+        private val MIC_RECOVERY_DELAYS = longArrayOf(1_500L, 4_000L, 10_000L, 20_000L)
 
-        private const val CHAT_PROMPT = "You are Ash, a helpful Android phone assistant. " +
-            "Reply naturally and concisely in the user's language, including Hindi or Hinglish. " +
-            "You are in conversation mode and cannot operate the phone in this mode. " +
-            "Never claim you performed a phone action."
+        internal fun chatPrompt(speechLanguage: String): String = if (speechLanguage == "hi") {
+            "You are Ash, a fast, helpful Android voice assistant. " +
+                "Understand English, Hindi, or Hinglish, and reply concisely in clear, natural English " +
+                "(or Hindi only if the user explicitly speaks or requests Hindi) in 1 to 3 short spoken sentences, " +
+                "plain text with no markdown or bullet lists. " +
+                "You are in conversation mode and cannot operate the phone in this mode. " +
+                "Never claim you performed a phone action."
+        } else {
+            "You are Ash, a fast, helpful Android voice assistant. " +
+                "Always reply in clear, natural English only — never reply in Hindi, Hinglish, or any other language " +
+                "unless the user explicitly asks you to translate. " +
+                "Keep answers concise (1 to 3 short spoken sentences) in plain text with no markdown, bullet points, or emojis. " +
+                "You are in conversation mode and cannot operate the phone in this mode. " +
+                "Never claim you performed a phone action."
+        }
 
         enum class Phase { OFF, IDLE, LISTENING, WORKING }
 

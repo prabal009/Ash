@@ -24,6 +24,9 @@ class OpenAiCompatibleSession(
     private val wire = ProviderRequest(config.baseUrl, toolSpecs.isNotEmpty())
     private val onPhone = wire.onPhone
     private val withTools = toolSpecs.isNotEmpty()
+    private val modelLower = config.model.lowercase(java.util.Locale.ROOT)
+    private val isReasoningModel = REASONING_HINTS.any { it in modelLower } ||
+        modelLower.startsWith("o1") || modelLower.startsWith("o3") || modelLower.startsWith("o4")
 
     override fun cancel() = wire.cancel()
 
@@ -87,13 +90,15 @@ class OpenAiCompatibleSession(
             }
         }
         wire.checkActive()
+        val rawContent = message.optString("content", "").takeUnless { message.isNull("content") } ?: ""
+        val cleanContent = stripThinking(rawContent)
         messages += JSONObject().put("role", "assistant")
-            .put("content", message.optString("content", "").takeUnless { message.isNull("content") } ?: "")
+            .put("content", cleanContent)
             .apply { if (rawCalls != null && rawCalls.length() > 0) put("tool_calls", rawCalls) }
 
         val finish = choice.optString("finish_reason")
-        val note = if (finish == "length") "Response was cut off (max tokens)." else null
-        AssistantTurn(message.optString("content", "").takeUnless { message.isNull("content") } ?: "", calls, note)
+        val note = if (finish == "length" && cleanContent.isBlank()) "Response was cut off (max tokens)." else null
+        AssistantTurn(cleanContent, calls, note)
     }
 
     private fun buildBody(stream: Boolean): JSONObject = JSONObject()
@@ -105,6 +110,12 @@ class OpenAiCompatibleSession(
             if (tools.length() > 0) {
                 put("tools", tools)
                 put("tool_choice", "auto")
+            }
+            if ((config.preset.id == "groq" && "gpt-oss" in modelLower) ||
+                (config.preset.id == "gemini" && "gemini-2.5" in modelLower)
+            ) {
+                // Keep reasoning latency low so voice replies start quickly without exhausting max_tokens.
+                put("reasoning_effort", "low")
             }
             if (onPhone) {
                 // llama.cpp options: reuse the cached start of the prompt, and answer steadily instead of creatively.
@@ -143,7 +154,21 @@ class OpenAiCompatibleSession(
                     }
                 }
             }
-            val reply = text.toString()
+            var reply = stripThinking(text.toString())
+            if (reply.isBlank()) {
+                // Some reasoning models or gateways omit streamed delta.content; retry once non-streamed.
+                wire.checkActive()
+                val json = wire.execute(request(stream = false)) { response ->
+                    JSONObject(response.body?.string().orEmpty())
+                }
+                val msg = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+                val fallback = msg?.optString("content", "")?.takeUnless { msg.isNull("content") }.orEmpty()
+                reply = stripThinking(fallback)
+                if (reply.isNotBlank()) {
+                    wire.checkActive()
+                    onText(reply)
+                }
+            }
             val now = SystemClock.elapsedRealtime()
             Log.i("JarvisTiming", "provider=compatible stream firstToken=${if (firstTokenAt > 0) firstTokenAt - startedAt else -1}ms total=${now - startedAt}ms")
             messages += JSONObject().put("role", "assistant").put("content", reply)
@@ -157,10 +182,12 @@ class OpenAiCompatibleSession(
         .build()
 
     private fun maxTokens(): Int = when {
-        withTools && onPhone -> 320
-        withTools -> 512
-        onPhone -> 160
-        else -> 192
+        withTools && isReasoningModel -> 1536
+        withTools && onPhone -> 512
+        withTools -> 768
+        isReasoningModel -> 1024
+        onPhone -> 256
+        else -> 384
     }
 
     /**
@@ -188,6 +215,10 @@ class OpenAiCompatibleSession(
         private const val KEEP_FULL_OBSERVATIONS = 1
         const val SCREEN_MARKER = "=== SCREEN"
         private val JSON = "application/json".toMediaType()
+        private val REASONING_HINTS = listOf("gpt-oss", "deepseek-r1", "qwen3", "gemini-2.5", "reasoning", "thinking")
+        private val THINK_BLOCK = Regex("<think>[\\s\\S]*?</think>\\s*", RegexOption.IGNORE_CASE)
+
+        internal fun stripThinking(text: String): String = text.replace(THINK_BLOCK, "").trim()
 
         private fun toolsJson(specs: List<ToolSpec>): JSONArray = JSONArray().apply {
             specs.forEach { spec ->

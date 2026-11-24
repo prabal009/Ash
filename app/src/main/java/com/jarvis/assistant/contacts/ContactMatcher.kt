@@ -74,7 +74,7 @@ object ContactMatcher {
         setOf("grandmother", "nani", "dadi", "granny", "grandma"),
         setOf("grandfather", "nana", "dada", "grandpa"),
     )
-    private val TITLES = setOf("mr", "mrs", "ms", "dr", "sir", "madam", "ji", "uncle", "aunty", "auntie", "shri", "the")
+    private val TITLES = setOf("mr", "mrs", "ms", "dr", "sir", "madam", "ji", "uncle", "aunty", "auntie", "shri", "the", "my")
     private val CONFIRM_DIAL = Regex("""yes|yeah|yep|yup|sure|ok|okay|confirm|go ahead|open the dialer|haan|han|ha|theek hai|thik hai|हाँ|हां|ठीक है""")
 
     fun normalizeName(raw: String): String {
@@ -139,8 +139,41 @@ object ContactMatcher {
         return number.takeIf { it.length - (if (it.startsWith('+')) 1 else 0) in 3..15 }
     }
 
-    internal fun distinctNumbers(numbers: List<PhoneNumber>): List<PhoneNumber> =
-        numbers.distinctBy { dialableNumber(it.number) ?: it.number }
+    internal fun distinctNumbers(numbers: List<PhoneNumber>): List<PhoneNumber> {
+        val result = ArrayList<PhoneNumber>()
+        for (candidate in numbers) {
+            val cDial = dialableNumber(candidate.number) ?: candidate.number
+            val existingIdx = result.indexOfFirst { samePhoneNumber(dialableNumber(it.number) ?: it.number, cDial) }
+            if (existingIdx < 0) {
+                result += candidate
+            } else {
+                val existing = result[existingIdx]
+                // Prefer primary or international (+country) formatting when merging duplicates (e.g. 9876543210 vs +919876543210).
+                val candidatePreferred = (candidate.primary && !existing.primary) ||
+                    (candidate.primary == existing.primary && cDial.startsWith('+') && !(dialableNumber(existing.number) ?: existing.number).startsWith('+'))
+                if (candidatePreferred) result[existingIdx] = candidate
+            }
+        }
+        return result
+    }
+
+    private fun samePhoneNumber(a: String, b: String): Boolean {
+        if (a == b) return true
+        val aPlus = a.startsWith('+')
+        val bPlus = b.startsWith('+')
+        val aDigits = a.removePrefix("+")
+        val bDigits = b.removePrefix("+")
+        if (aDigits.isEmpty() || bDigits.isEmpty()) return false
+        if (!aPlus && !bPlus) {
+            return aDigits.trimStart('0') == bDigits.trimStart('0') && aDigits.trimStart('0').length >= 10
+        }
+        if (aPlus != bPlus) {
+            val intl = if (aPlus) aDigits else bDigits
+            val local = (if (aPlus) bDigits else aDigits).trimStart('0')
+            return local.length == 10 && intl.length in 11..14 && intl.endsWith(local)
+        }
+        return false
+    }
 
     internal fun pickNumber(answer: String?, numbers: List<PhoneNumber>): PhoneNumber? {
         Lexicon.optionIndex(answer)?.let { return numbers.getOrNull(it) }

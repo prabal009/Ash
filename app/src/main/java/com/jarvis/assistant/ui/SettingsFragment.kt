@@ -33,12 +33,37 @@ class SettingsFragment : Fragment() {
     private val refreshers = mutableListOf<() -> Unit>()
     private var preview: Speaker? = null
     private val onDownload: () -> Unit = { refreshers.forEach { it() } }
+    private var updatingDirectCall = false
     private val callPermissions = arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE)
     private val requestCallPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val granted = hasCallPermissions()
         settings.directContactCalls = granted
-        _ui?.directCallSwitch?.isChecked = granted
-        if (!granted) Toast.makeText(requireContext(), R.string.direct_contact_calls_denied, Toast.LENGTH_LONG).show()
+        setDirectCallChecked(granted)
+        if (granted) {
+            Toast.makeText(requireContext(), R.string.direct_contact_calls_enabled, Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(requireContext(), R.string.direct_contact_calls_denied, Toast.LENGTH_LONG).show()
+            val permanentlyDenied = callPermissions.any { perm ->
+                ContextCompat.checkSelfPermission(requireContext(), perm) != PackageManager.PERMISSION_GRANTED &&
+                    !shouldShowRequestPermissionRationale(perm)
+            }
+            if (permanentlyDenied) {
+                runCatching {
+                    startActivity(
+                        Intent(
+                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.fromParts("package", requireContext().packageName, null),
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun setDirectCallChecked(checked: Boolean) {
+        updatingDirectCall = true
+        _ui?.directCallSwitch?.isChecked = checked
+        updatingDirectCall = false
     }
 
     private fun hasCallPermissions(): Boolean = callPermissions.all {
@@ -115,12 +140,14 @@ class SettingsFragment : Fragment() {
 
         // Permissions
         refreshers += Setup.bindRows(activity, ui.permissionRows, listOf(Setup.Item.MICROPHONE, Setup.Item.PHONE_CONTROL, Setup.Item.BACKGROUND))
-        ui.directCallSwitch.setOnClickListener {
-            if (!ui.directCallSwitch.isChecked) {
+        setDirectCallChecked(settings.directContactCalls && hasCallPermissions())
+        ui.directCallSwitch.setOnCheckedChangeListener { _, checked ->
+            if (updatingDirectCall) return@setOnCheckedChangeListener
+            if (!checked) {
                 settings.directContactCalls = false
             } else {
-                // Showing a checked switch before the user consents or Android grants access is misleading.
-                ui.directCallSwitch.isChecked = false
+                // Keep switch unchecked until the user confirms consent and permissions are granted.
+                setDirectCallChecked(false)
                 AlertDialog.Builder(activity)
                     .setTitle(R.string.direct_contact_calls)
                     .setMessage(R.string.direct_contact_calls_hint)
@@ -128,7 +155,8 @@ class SettingsFragment : Fragment() {
                     .setPositiveButton(R.string.direct_contact_calls_enable) { _, _ ->
                         if (hasCallPermissions()) {
                             settings.directContactCalls = true
-                            ui.directCallSwitch.isChecked = true
+                            setDirectCallChecked(true)
+                            Toast.makeText(activity, R.string.direct_contact_calls_enabled, Toast.LENGTH_SHORT).show()
                         } else {
                             requestCallPermissions.launch(callPermissions)
                         }
@@ -193,7 +221,7 @@ class SettingsFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         if (settings.directContactCalls && !hasCallPermissions()) settings.directContactCalls = false
-        ui.directCallSwitch.isChecked = settings.directContactCalls
+        setDirectCallChecked(settings.directContactCalls)
         Kokoro.warmUp(requireContext()) // so Preview responds quickly
         Downloads.listen(onDownload)
         refreshers.forEach { it() }
