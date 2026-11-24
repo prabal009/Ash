@@ -1394,6 +1394,8 @@ class JarvisService : Service() {
             State.LISTENING_COMMAND -> Phase.LISTENING
             State.WORKING -> Phase.WORKING
         }
+        speakingNow = captureState == VoiceState.SPEAKING
+        micInterrupted = captureState == VoiceState.INTERRUPTED || captureState == VoiceState.ERROR_RECOVERY
         val summary = when (captureState) {
             VoiceState.WAKE_LISTENING -> getString(R.string.ash_notification_wake)
             VoiceState.INTERRUPTED, VoiceState.ERROR_RECOVERY -> getString(R.string.ash_notification_paused)
@@ -1477,6 +1479,10 @@ class JarvisService : Service() {
             private set
         @Volatile var phase = Phase.OFF
             private set
+        @Volatile var speakingNow = false
+            private set
+        @Volatile var micInterrupted = false
+            private set
         @Volatile var status = "Off"
             private set
         @Volatile var lastTask: String? = null
@@ -1484,7 +1490,7 @@ class JarvisService : Service() {
         @Volatile var lastResult: String? = null
             private set
         @androidx.annotation.VisibleForTesting
-        fun resetForTest() { lastTask = null; lastResult = null; status = "Off"; phase = Phase.OFF }
+        fun resetForTest() { lastTask = null; lastResult = null; status = "Off"; phase = Phase.OFF; speakingNow = false; micInterrupted = false }
 
         /**
          * Phase 4 Bluetooth integration seam: supplies the [AudioRouteController] used by

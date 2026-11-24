@@ -3,7 +3,7 @@
 **Date:** 2026-11-24  
 **Branch:** `phase4-bluetooth-integration` (base commit `e0ea3e0`, plus Phase 7 end-to-end fixes & CPH2467 validation)  
 **Application ID:** `com.jarvis.assistant` (`minSdk = 26`, `targetSdk = 35`, `compileSdk = 35`, `versionName = "0.1.0"`, `versionCode = 1`)  
-**Connected Test Device:** OnePlus **CPH2467** (Android 15, API 35, `arm64-v8a`, USB serial `557d9cdd`)  
+**Connected Test Device:** OnePlus **CPH2467** (Android 15, API 35, `arm64-v8a`, USB serial `<redacted>`)  
 **Final Release-Readiness Verdict:** **`READY FOR CONTROLLED DEVICE TESTING`** *(Safe and ready for personal testing on CPH2467 today; full `READY FOR PERSONAL USE` awaits completion of the manual spoken/screen-off/calling/idle checklist in Section 23 on physical hardware.)*
 
 ---

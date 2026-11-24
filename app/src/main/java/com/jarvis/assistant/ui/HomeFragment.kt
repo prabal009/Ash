@@ -83,17 +83,23 @@ class HomeFragment : Fragment() {
         ui.wakeExample.text = getString(R.string.wake_example, settings.wakePromptPhrase)
         val running = JarvisService.running
         val phase = if (running) JarvisService.phase else Phase.OFF
-        ui.reactor.mode = when (phase) {
-            Phase.OFF -> ArcReactorView.Mode.OFF
-            Phase.IDLE -> ArcReactorView.Mode.IDLE
-            Phase.LISTENING -> ArcReactorView.Mode.LISTENING
-            Phase.WORKING -> ArcReactorView.Mode.WORKING
+        val isSpeaking = running && JarvisService.speakingNow
+        val isInterrupted = running && JarvisService.micInterrupted
+        ui.reactor.mode = when {
+            !running -> ArcReactorView.Mode.OFF
+            isInterrupted -> ArcReactorView.Mode.ERROR
+            isSpeaking -> ArcReactorView.Mode.SPEAKING
+            phase == Phase.LISTENING -> ArcReactorView.Mode.LISTENING
+            phase == Phase.WORKING -> ArcReactorView.Mode.WORKING
+            else -> ArcReactorView.Mode.IDLE
         }
-        ui.statusLabel.text = when (phase) {
-            Phase.OFF -> getString(R.string.phase_off)
-            Phase.IDLE -> getString(R.string.phase_ready)
-            Phase.LISTENING -> getString(R.string.phase_listening)
-            Phase.WORKING -> getString(R.string.phase_working)
+        ui.statusLabel.text = when {
+            !running -> getString(R.string.phase_off)
+            isInterrupted -> getString(R.string.state_interrupted)
+            isSpeaking -> getString(R.string.state_speaking)
+            phase == Phase.LISTENING -> getString(R.string.phase_listening)
+            phase == Phase.WORKING -> getString(R.string.phase_working)
+            else -> getString(R.string.phase_ready)
         }
         ui.statusText.text = if (running || JarvisService.status != "Off") JarvisService.status else getString(R.string.home_off_status)
         val last = JarvisService.lastResult

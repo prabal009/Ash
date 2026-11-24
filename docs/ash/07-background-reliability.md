@@ -1,7 +1,7 @@
 # Project Ash — Background Reliability, Screen-Off & Locked-Screen Engineering Report
 
 **Date:** 2026-11-24  
-**Target Device:** OnePlus **CPH2467** (Android 15, API 35, OxygenOS/ColorOS, `arm64-v8a`, USB serial `557d9cdd`)  
+**Target Device:** OnePlus **CPH2467** (Android 15, API 35, OxygenOS/ColorOS, `arm64-v8a`, USB serial `<redacted>`)  
 **Branch:** `phase4-bluetooth-integration`  
 **Final Debug APK Installed:** `app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` (`29,722,649` bytes)
 

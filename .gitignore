@@ -4,23 +4,29 @@ build/
 .kotlin/
 *.apk
 *.aab
-.github
-.git
 
-# Local machine settings
+# Local machine settings & environment secrets
 local.properties
+.env
+.env.*
+*.env
 .idea/
 *.iml
 .DS_Store
 captures/
+*.log
+*.bak
 
 # Downloaded by the build (see app/build.gradle.kts)
 app/libs/*.aar
 app/libs/*.part
 
-# Signing keys: never commit these
+# Signing keys & private certificates: never commit these
 *.jks
 *.keystore
+*.pem
+*.p12
+*.key
 
 # Optional native engine and models for RealEngineTest (see CONTRIBUTING.md)
 /test-native/*

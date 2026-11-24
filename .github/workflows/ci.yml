@@ -66,7 +66,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-debug-apk
+          name: ash-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
       - name: Unit tests and lint

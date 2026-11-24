@@ -99,8 +99,8 @@ class IslandFrame @JvmOverloads constructor(context: Context, attrs: AttributeSe
         if (gradient == null || gradientFor != cx) {
             gradientFor = cx
             gradient = SweepGradient(cx, cy,
-                intArrayOf(0x00FFFFFF, 0x55FFFFFF, 0xFFFFFFFF.toInt(), 0x55FFFFFF, 0x00FFFFFF, 0x00FFFFFF, 0x66FFFFFF, 0x00FFFFFF),
-                floatArrayOf(0f, 0.12f, 0.22f, 0.32f, 0.45f, 0.6f, 0.78f, 1f))
+                intArrayOf(0x0038BDF8, 0x6638BDF8, 0xFFE0F2FE.toInt(), 0xAA818CF8.toInt(), 0x00818CF8, 0x0038BDF8, 0x7738BDF8, 0x0038BDF8),
+                floatArrayOf(0f, 0.12f, 0.22f, 0.34f, 0.46f, 0.62f, 0.78f, 1f))
         }
         val angle = (SystemClock.uptimeMillis() % 2400L) / 2400f * 360f
         matrix.setRotate(angle, cx, cy)
@@ -140,7 +140,7 @@ class LevelBars @JvmOverloads constructor(context: Context, attrs: AttributeSet?
     /** Current loudness, 0..1, or null to show a quiet resting state. */
     var level: (() -> Float?)? = null
 
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF7DD3FC.toInt() }
     private val heights = FloatArray(4) { 0.15f }
     private val shape = floatArrayOf(0.6f, 1f, 0.8f, 0.5f) // middle bars move most
     private val bar = RectF()
