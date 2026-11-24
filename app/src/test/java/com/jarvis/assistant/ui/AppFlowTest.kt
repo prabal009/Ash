@@ -9,11 +9,13 @@ import com.google.android.material.chip.ChipGroup
 import com.jarvis.assistant.R
 import com.jarvis.assistant.Settings
 import com.jarvis.assistant.ModelProfile
+import com.jarvis.assistant.ai.TestAndroidKeyStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -25,6 +27,7 @@ import org.robolectric.shadows.ShadowLooper
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class AppFlowTest {
+    @get:Rule internal val keyStore = TestAndroidKeyStore()
     private val ctx: Context = ApplicationProvider.getApplicationContext()
     private lateinit var settings: Settings
 
@@ -125,6 +128,7 @@ class AppFlowTest {
             .putString("p.lmstudio.base", "http://10.0.0.5:1234/v1")
             .putString("p.lmstudio.model", "qwen")
             .commit()
+        assertTrue(settings.migrateProviderCredentials())
         val names = settings.profiles().map { it.providerId }
         assertEquals(listOf("anthropic", "lmstudio"), names)
         assertEquals("lmstudio", settings.primary()?.providerId)

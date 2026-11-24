@@ -38,10 +38,21 @@ class MainActivity : AppCompatActivity() {
             true
         }
         if (savedInstanceState == null) {
-            ui.nav.selectedItemId = intent.getIntExtra(EXTRA_TAB, R.id.nav_home)
+            ui.nav.selectedItemId = targetTab(intent)
             // Ask for anything Android lets an app request directly, every time it's missing.
             if (!Setup.isDone(this, Setup.Item.MICROPHONE)) requestPermissions(Setup.PERMISSIONS, 1)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (::ui.isInitialized) ui.nav.selectedItemId = targetTab(intent)
+    }
+
+    private fun targetTab(intent: Intent?): Int = when (intent?.action) {
+        Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND -> R.id.nav_home
+        else -> intent?.getIntExtra(EXTRA_TAB, R.id.nav_home) ?: R.id.nav_home
     }
 
     fun goTo(tabId: Int) { ui.nav.selectedItemId = tabId }

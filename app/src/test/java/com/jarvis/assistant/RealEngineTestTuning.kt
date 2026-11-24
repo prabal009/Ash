@@ -64,6 +64,8 @@ class RealEngineTestTuning {
         System.load(File(lib, "libonnxruntime.so").absolutePath)
         System.load(File(lib, "libsherpa-onnx-jni.so").absolutePath)
         shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>()).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+        val mic = org.robolectric.shadows.AudioDeviceInfoBuilder.newBuilder().setType(android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC).build()
+        VoiceInput.routedDeviceOf = { mic }
         ModelDownloader.unpack(File(models, "kokoro.tar.bz2"), Kokoro.modelDir(ctx), ModelDownloader::openTarBz2)
         ModelDownloader.unpack(File(models, "kws.tar.bz2"), WakeModel.dir(ctx), ModelDownloader::openTarBz2)
         ModelDownloader.prune(WakeModel.dir(ctx), WakeModel.KEEP_FILES)
@@ -90,10 +92,10 @@ class RealEngineTestTuning {
     }
 
     private val voices = listOf(5, 6, 9, 10, 1, 7)
-    private val wakePhrases = listOf("Hey Jarvis, turn on the flashlight.", "Hey Jarvis, what's the weather?", "Jarvis, call mum.")
-    private val soundAlikes = listOf("Hey Travis, how are you?", "The harvest is almost ready.", "Have you seen my car keys?",
-        "Jar of biscuits please.", "Hey service desk.", "Charge this phone.", "Hey Jarred, nice to see you.", "Harvey's coming over.",
-        "The jars are in the cupboard.", "Nervous about the exam.", "Hey, are you there?", "Davis Cup final.")
+    private val wakePhrases = listOf("Hey Ash, turn on the flashlight.", "Hello Ash, what time is it?", "Hey Ash, call mum.", "Hello Ash, pause the music.")
+    private val soundAlikes = listOf("Hey cash, how are you?", "Hello Ashley, are you there?", "Hey ask about the flash.",
+        "Take out the trash please.", "Wash the dishes now.", "Ash tray on the table.", "Actually I think so.", "Flashlight is bright.",
+        "Hey Jarvis, turn on the flashlight.", "Crash the party tonight.", "Dash to the store.", "Hello bash script.")
 
     /** Feeds [script] through VoiceInput as fast as it can process it, counting wake-ups. */
     private fun countWakes(script: FloatArray, gain: Boolean): Int {
@@ -113,7 +115,10 @@ class RealEngineTestTuning {
         })
         var wakes = 0
         lateinit var voice: VoiceInput
-        voice = VoiceInput(ctx) { wakes++; voice.cancelCommand() } // back to waiting for the wake word
+        val routeController = object : com.jarvis.assistant.audio.AudioRouteController {
+            override fun acceptInputDevice(device: android.media.AudioDeviceInfo?, purpose: com.jarvis.assistant.audio.AudioRoutePurpose) = device != null
+        }
+        voice = VoiceInput(ctx, routeController) { wakes++; voice.cancelCommand() } // back to waiting for the wake word
         voice.echoCancellation = false
         voice.autoGain = gain
         var loaded = false

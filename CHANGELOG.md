@@ -4,6 +4,11 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Ash
+- Ash now has two offline wake phrases: **Hey Ash** and **Hello Ash**. Install the wake and English speech models, then enable screen-off listening from Home. Tap Talk for a one-shot command. The restart option is a reminder, not automatic microphone capture.
+- Choose Ash as the default digital assistant in Android Settings if supported. Contact actions use the system dialer after confirmation; media controls can optionally use active Android media sessions.
+- Fixed wake-word pre-roll being mistaken for a command when the user pauses after the wake phrase. Tuned **Hey Ash** on synthetic speech; physical-phone recognition and screen-off reliability are still unverified.
+
 ### Added
 - **The app in Hindi.** Every screen (Home, Models, Settings, setup, memories, task history, the task island and the notification buttons) is translated. Jarvis follows the phone's language, and on Android 13 and newer it can be set per app in *Settings → Apps → Jarvis → Language*. What Jarvis says aloud stays in English, because the voice speaks English only. All interface text now lives in string resources, so other languages can be added without code changes.
 - **Per-app tips.** The first time an app is in front during a task, the model gets a few short notes about how that app is laid out. WhatsApp, YouTube, Chrome, Gmail, Google Maps, Settings, Google Messages, Telegram, Spotify and the Play Store have built-in tips. Add your own in **Settings > About you > Tips for apps**, one per line as `App name: tip`. Your tips come before the built-in ones, and each app's tips are sent once per task.

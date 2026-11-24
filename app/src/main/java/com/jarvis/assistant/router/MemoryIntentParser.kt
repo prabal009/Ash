@@ -6,7 +6,6 @@ package com.jarvis.assistant.router
  */
 object MemoryIntentParser {
     private val OPT = RegexOption.IGNORE_CASE
-    private val GREETING = Regex("""^(?:(?:hey|ok|okay)\s+)?jarvis[,.]?\s+""", OPT)
 
     private val TEACH_WHEN = Regex(
         """^(?:when|if|whenever) i (?:say|said|tell you|ask for|call)\s+["“']?(.+?)["”']?,?\s+(?:then\s+|you should\s+|please\s+)?""" +
@@ -43,7 +42,7 @@ object MemoryIntentParser {
     private const val MAX_FACT = 200
 
     fun parse(raw: String): MemoryIntent? {
-        val s = raw.trim().replace(GREETING, "").trim()
+        val s = Lexicon.stripCommandAddress(raw).trim()
         if (s.isEmpty()) return null
         teach(s)?.let { return it }
         FORGET.matchEntire(s)?.groupValues?.get(1)?.let { return forget(it) }

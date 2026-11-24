@@ -48,16 +48,18 @@ interface ChatSession {
 }
 
 object Llm {
-    /** Sends a tiny request to check the address, key and model. Returns the reply text; throws on failure. */
+    /** Sends a tiny request to check the address, key and model without exposing provider response text. */
     fun test(config: ProviderConfig): String {
-        val ping = ToolSpec("ping", "Reply received.", obj("ok" to bool("Always true."), required = listOf("ok")))
-        val turn = newSession(config, "You are being tested. Reply with the single word OK.", listOf(ping)).send("Say OK.", emptyList())
-        return turn.text.ifBlank { if (turn.toolCalls.isNotEmpty()) "OK (tool call)" else turn.stopNote ?: "OK" }
+        val turn = newSession(config, "You are being tested. Reply with the single word OK.", emptyList())
+            .send("Say OK.", emptyList())
+        return turn.stopNote ?: "OK"
     }
 
-    fun newSession(config: ProviderConfig, system: String, tools: List<ToolSpec>): ChatSession =
+    fun newSession(config: ProviderConfig, system: String, tools: List<ToolSpec>): ChatSession = providerResult {
+        if (config.preset.needsKey && config.apiKey.isBlank()) throw ProviderFailure("Enter an API key for this provider.")
         when (config.preset.kind) {
             ApiKind.ANTHROPIC -> AnthropicSession(config, system, tools)
             ApiKind.OPENAI_COMPATIBLE -> OpenAiCompatibleSession(config, system, tools)
         }
+    }
 }

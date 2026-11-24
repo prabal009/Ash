@@ -57,7 +57,7 @@ class EmbeddedRuntime private constructor(context: Context) {
 
     fun baseUrl(): String = "http://127.0.0.1:${RuntimeConfig.PORT}/v1"
 
-    fun apiKey(): String = settings.runtimeApiKey.ifBlank { RuntimeConfig.newApiKey().also { settings.runtimeApiKey = it } }
+    fun apiKey(): String = settings.getOrCreateRuntimeApiKey(RuntimeConfig::newApiKey)
 
     /** Marks the runtime as in use now, so the idle timer starts over. */
     fun touch() {
@@ -129,7 +129,7 @@ class EmbeddedRuntime private constructor(context: Context) {
         synchronized(lock) {
             if (health() == ServerHealth.State.OK) return true // someone else just started it
             if (RuntimePolicy.giveUp(crashes)) {
-                set(Status(Phase.FAILED, "The on-device model keeps crashing. See ${logFile().name} in the app's files."))
+                set(Status(Phase.FAILED, "The on-device model keeps crashing."))
                 return false
             }
             if (process?.isAlive != true) spawn(bin) ?: return false
@@ -141,22 +141,28 @@ class EmbeddedRuntime private constructor(context: Context) {
 
     private fun spawn(bin: File): Process? {
         set(Status(Phase.STARTING, "Starting the on-device model"))
-        val cmd = listOf(bin.path) + RuntimeConfig.args(
-            modelFile().path, RuntimeConfig.PORT, apiKey(), RuntimeConfig.threadsFor(Runtime.getRuntime().availableProcessors()),
-        )
+        val key = try {
+            apiKey()
+        } catch (_: IllegalStateException) {
+            set(Status(Phase.FAILED, "Open Settings to check secure storage for the on-device model."))
+            return null
+        }
         return try {
-            val pb = ProcessBuilder(cmd).redirectErrorStream(true).directory(app.filesDir)
+            val cmd = listOf(bin.path) + RuntimeConfig.args(
+                modelFile().path, RuntimeConfig.PORT, key, RuntimeConfig.threadsFor(Runtime.getRuntime().availableProcessors()),
+            )
+            val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                .redirectOutput(File("/dev/null")).directory(app.filesDir)
             pb.environment()["LD_LIBRARY_PATH"] = app.applicationInfo.nativeLibraryDir
             val p = pb.start()
             process = p
             writePid(p)
-            drainToLog(p)
             startSupervisor()
             p
-        } catch (e: Exception) {
-            Log.e(TAG, "could not start the on-device runtime", e)
+        } catch (_: Exception) {
+            Log.e(TAG, "could not start the on-device runtime")
             crashes++
-            set(Status(Phase.FAILED, "Could not start the on-device model: ${e.message}"))
+            set(Status(Phase.FAILED, "Could not start the on-device model."))
             null
         }
     }
@@ -168,7 +174,7 @@ class EmbeddedRuntime private constructor(context: Context) {
                 if (health() == ServerHealth.State.OK) { crashes = 0; set(Status(Phase.RUNNING)); return true }
                 if (process?.isAlive != true) {
                     crashes++
-                    set(Status(Phase.FAILED, "The on-device model stopped while starting. ${lastLogLine()}"))
+                    set(Status(Phase.FAILED, "The on-device model stopped while starting."))
                     return false
                 }
                 Thread.sleep(300)
@@ -226,23 +232,8 @@ class EmbeddedRuntime private constructor(context: Context) {
 
     // ---- bookkeeping ----
 
-    private fun logFile() = File(app.filesDir, "llama.log")
     private fun pidFile() = File(app.filesDir, "llama.pid")
 
-    private fun lastLogLine(): String = runCatching { logFile().readLines().lastOrNull { it.isNotBlank() }.orEmpty().take(160) }.getOrDefault("")
-
-    private fun drainToLog(p: Process) {
-        Thread({
-            try {
-                val log = logFile()
-                if (log.length() > 1_000_000) log.renameTo(File(log.path + ".1"))
-                log.appendText("--- start ${java.util.Date()} ---\n")
-                p.inputStream.bufferedReader().useLines { lines -> lines.forEach { log.appendText(it + "\n") } }
-            } catch (_: Exception) {
-                // process ended
-            }
-        }, "jarvis-runtime-log").apply { isDaemon = true; start() }
-    }
 
     /** Remembers the child's process id (Android 13+), so a server left over from a killed app can be stopped. */
     private fun writePid(p: Process) {

@@ -15,23 +15,23 @@ class PersonaTest {
     private fun at(iso: String) = Instant.parse(iso)
 
     @Test fun greetingFollowsTheTimeOfDay() {
-        assertEquals("Hello sir, good morning. What's the task for today?", Persona.greeting(8))
-        assertEquals("Hello sir, good afternoon. What's the task for today?", Persona.greeting(13))
-        assertEquals("Hello sir, good evening. What's the task for today?", Persona.greeting(19))
-        assertEquals("Hello sir, good evening. What's the task for today?", Persona.greeting(2))
+        assertEquals("Good morning. I'm Ash. What can I help you with?", Persona.greeting(8))
+        assertEquals("Good afternoon. I'm Ash. What can I help you with?", Persona.greeting(13))
+        assertEquals("Good evening. I'm Ash. What can I help you with?", Persona.greeting(19))
+        assertEquals("Good evening. I'm Ash. What can I help you with?", Persona.greeting(2))
         assertEquals(Persona.Daypart.MORNING, Persona.daypart(4))
         assertEquals(Persona.Daypart.MORNING, Persona.daypart(11))
         assertEquals(Persona.Daypart.AFTERNOON, Persona.daypart(12))
         assertEquals(Persona.Daypart.EVENING, Persona.daypart(17))
-        assertEquals("Good morning, sir.", Persona.greetingPrefix(9))
-        assertEquals(3, Persona.ALL_GREETINGS.toSet().size)
+        assertEquals("Good morning.", Persona.greetingPrefix(9))
+        assertEquals(listOf(8, 13, 19).map(Persona::greeting), Persona.ALL_GREETINGS)
     }
 
     @Test fun greetsOnceAndOnlyOncePerDay() {
         val store = MemoryStore()
         var now = at("2026-11-05T03:30:00Z") // 09:00 in India
         val g = DailyGreeting(store, { ZoneId.of("Asia/Kolkata") }, { now })
-        assertEquals("Hello sir, good morning. What's the task for today?", g.takeGreeting())
+        assertEquals("Good morning. I'm Ash. What can I help you with?", g.takeGreeting())
         assertNull(g.takeGreeting())
         now = at("2026-11-05T12:00:00Z")
         assertNull(g.takeGreeting())
@@ -44,7 +44,7 @@ class PersonaTest {
         // 23:00 UTC on Nov 5 is already Nov 6 in India (04:30)
         val g = DailyGreeting(store, { ZoneId.of("Asia/Kolkata") }, { at("2026-11-05T23:00:00Z") })
         assertTrue(g.isDue())
-        assertEquals("Good morning, sir.", g.takePrefix()) // 04:30 on Nov 6
+        assertEquals("Good morning.", g.takePrefix()) // 04:30 on Nov 6
         assertFalse(g.isDue())
     }
 
@@ -61,7 +61,7 @@ class PersonaTest {
         val store = MemoryStore()
         var zone = ZoneId.of("Asia/Kolkata")
         val g = DailyGreeting(store, { zone }, { at("2026-11-05T05:00:00Z") })
-        assertEquals("Hello sir, good morning. What's the task for today?", g.takeGreeting()) // 10:30 Nov 5
+        assertEquals("Good morning. I'm Ash. What can I help you with?", g.takeGreeting()) // 10:30 Nov 5
         zone = ZoneId.of("Europe/London") // same instant, still Nov 5 there
         assertNull(g.takeGreeting())
     }

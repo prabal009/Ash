@@ -1,6 +1,7 @@
 package com.jarvis.assistant.contacts
 
 import com.jarvis.assistant.router.AppMatcher
+import com.jarvis.assistant.router.Lexicon
 
 data class PhoneNumber(val number: String, val type: String, val primary: Boolean = false)
 
@@ -74,6 +75,7 @@ object ContactMatcher {
         setOf("grandfather", "nana", "dada", "grandpa"),
     )
     private val TITLES = setOf("mr", "mrs", "ms", "dr", "sir", "madam", "ji", "uncle", "aunty", "auntie", "shri", "the")
+    private val CONFIRM_DIAL = Regex("""yes|yeah|yep|yup|sure|ok|okay|confirm|go ahead|open the dialer|haan|han|ha|theek hai|thik hai|हाँ|हां|ठीक है""")
 
     fun normalizeName(raw: String): String {
         val roman = if (Translit.hasDevanagari(raw)) Translit.toRoman(raw) else raw
@@ -93,7 +95,7 @@ object ContactMatcher {
 
         fun tier(how: String, test: (List<String>, String) -> Boolean): ContactMatch? {
             val hits = rows.filter { (_, t) -> test(t, t.joinToString(" ")) }.map { it.first }
-            return if (hits.isEmpty()) null else ContactMatch(hits.take(5), how)
+            return if (hits.isEmpty()) null else ContactMatch(hits, how)
         }
 
         tier("exact") { _, full -> full == q || full.replace(" ", "") == qc }?.let { return it }
@@ -112,20 +114,41 @@ object ContactMatcher {
 
     /** Which of the [candidates] the user chose by saying [answer], or null if the answer does not point to exactly one. */
     fun pick(answer: String, candidates: List<ContactEntry>): ContactEntry? {
+        Lexicon.optionIndex(answer)?.let { return candidates.getOrNull(it) }
         val a = tokens(answer)
         if (a.isEmpty()) return null
-        val ordinal = mapOf("first" to 0, "pehla" to 0, "pehle" to 0, "1" to 0, "one" to 0, "second" to 1, "doosra" to 1, "dusra" to 1, "2" to 1, "two" to 1, "third" to 2, "teesra" to 2, "3" to 2, "three" to 2)
-        a.firstNotNullOfOrNull { ordinal[it] }?.let { idx -> candidates.getOrNull(idx)?.let { return it } }
         val hits = candidates.filter { c -> val t = tokens(c.name); a.any { w -> w in t || t.any { it.startsWith(w) && w.length >= 3 } } }
         if (hits.size == 1) return hits.single()
         val strict = candidates.filter { c -> val t = tokens(c.name); a.all { w -> w in t } }
         return strict.singleOrNull()
     }
 
-    /** The number to call: the one marked primary, else a mobile number, else the first. */
-    fun bestNumber(c: ContactEntry): PhoneNumber? =
-        c.numbers.firstOrNull { it.primary } ?: c.numbers.firstOrNull { it.type == "mobile" } ?: c.numbers.firstOrNull()
+    /** Accept only the number shown to the user; don't silently drop extensions, pause or service-code characters. */
+    internal fun dialableNumber(raw: String): String? {
+        val number = buildString(raw.length) {
+            for (c in raw) {
+                val digit = c.digitToIntOrNull()
+                when {
+                    digit != null -> append(digit)
+                    c == '+' && isEmpty() -> append(c)
+                    c.isWhitespace() || c in "().-" -> Unit
+                    else -> return null
+                }
+            }
+        }
+        return number.takeIf { it.length - (if (it.startsWith('+')) 1 else 0) in 3..15 }
+    }
 
-    /** "Rahul Sharma, mobile" for spoken confirmation. */
-    fun describe(c: ContactEntry, n: PhoneNumber): String = "${c.name}, ${n.type}"
+    internal fun distinctNumbers(numbers: List<PhoneNumber>): List<PhoneNumber> =
+        numbers.distinctBy { dialableNumber(it.number) ?: it.number }
+
+    internal fun pickNumber(answer: String?, numbers: List<PhoneNumber>): PhoneNumber? {
+        Lexicon.optionIndex(answer)?.let { return numbers.getOrNull(it) }
+        val reply = answer.orEmpty().trim().lowercase().removePrefix("the ").removeSuffix(" number")
+        val number = dialableNumber(reply)
+        return numbers.singleOrNull { it.type == reply || (number != null && dialableNumber(it.number) == number) }
+    }
+
+    internal fun confirmsDial(answer: String?): Boolean =
+        CONFIRM_DIAL.matches(Lexicon.normalize(answer.orEmpty()))
 }

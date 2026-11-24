@@ -37,7 +37,9 @@ class CrashSafetyTest {
     @Before
     fun setUp() {
         ctx.getSharedPreferences("jarvis", Context.MODE_PRIVATE).edit().clear().commit()
-        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>()).grantPermissions(Manifest.permission.RECORD_AUDIO)
+        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+        JarvisService.resetForTest()
     }
 
     private fun fakeInstall(dir: File, names: Collection<String>) {
@@ -60,7 +62,8 @@ class CrashSafetyTest {
         fakeInstall(SpeechModel.dir(ctx), SpeechModel.KEEP_FILES)
         Settings(ctx).switchedOn = true
         assertTrue(WakeModel.isInstalled(ctx) && SpeechModel.isInstalled(ctx))
-        val controller = Robolectric.buildService(JarvisService::class.java).create().startCommand(0, 1)
+        val intent = android.content.Intent(ctx, JarvisService::class.java).setAction(JarvisService.ACTION_ARM)
+        val controller = Robolectric.buildService(JarvisService::class.java, intent).create().startCommand(0, 1)
         assertTrue(JarvisService.running)
         assertTrue("reports the problem instead of crashing: ${JarvisService.status}",
             waitFor { JarvisService.status.contains("couldn't start") })

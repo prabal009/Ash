@@ -20,11 +20,10 @@ sealed interface FastCommand {
 
     /** on = null means toggle. */
     data class Flashlight(val on: Boolean?) : FastCommand
-    data class Media(val action: MediaAction) : FastCommand
+    data class Media(val action: MediaAction, val app: String? = null) : FastCommand
     data class WebSearch(val query: String, val site: String = "google") : FastCommand
 
-    /** "open YouTube and play Despacito": search in the YouTube app, pick the first video, check that it plays. */
-    data class PlayYouTube(val query: String) : FastCommand
+    data class PlayMusic(val query: String, val app: String? = null) : FastCommand
     data class OpenSettings(val page: String, val toggleRequested: Boolean = false) : FastCommand
     data object OpenCamera : FastCommand
     data class SetAlarm(val hour: Int, val minute: Int) : FastCommand

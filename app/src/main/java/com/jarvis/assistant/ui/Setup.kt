@@ -11,12 +11,15 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
+import android.service.voice.VoiceInteractionService
 import android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS
 import android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS
-import android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
-import android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
 import android.provider.Settings.Secure
+import android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS
+import android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS
+import androidx.appcompat.app.AlertDialog
+import com.jarvis.assistant.assistant.AshVoiceInteractionService
+import com.jarvis.assistant.service.JarvisService
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -42,8 +45,8 @@ object Setup {
         val required: Boolean,
     ) {
         MICROPHONE(R.drawable.ic_mic, R.string.item_mic_title, R.string.item_mic_sub, R.string.allow, true),
-        PHONE_CONTROL(R.drawable.ic_touch, R.string.item_control_title, R.string.item_control_sub, R.string.enable, true),
-        BACKGROUND(R.drawable.ic_battery, R.string.item_bg_title, R.string.item_bg_sub, R.string.allow, false),
+        PHONE_CONTROL(R.drawable.ic_touch, R.string.item_control_title, R.string.item_control_sub, R.string.enable, false),
+        BACKGROUND(R.drawable.ic_mic, R.string.ash_default_app, R.string.ash_default_app_manual, R.string.open_settings, false),
         WAKE_WORD(R.drawable.ic_wave, R.string.item_wake_title, R.string.item_wake_sub, R.string.download, false),
         SPEECH(R.drawable.ic_mic, R.string.item_speech_title, R.string.item_speech_sub, R.string.download, false),
         VOICE(R.drawable.ic_voice, R.string.item_voice_title, R.string.item_voice_sub, R.string.download, false),
@@ -57,7 +60,7 @@ object Setup {
     fun isDone(context: Context, item: Item): Boolean = when (item) {
         Item.MICROPHONE -> ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         Item.PHONE_CONTROL -> isAccessibilityEnabled(context)
-        Item.BACKGROUND -> context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
+        Item.BACKGROUND -> VoiceInteractionService.isActiveService(context, ComponentName(context, AshVoiceInteractionService::class.java))
         Item.WAKE_WORD -> WakeModel.isInstalled(context)
         Item.SPEECH -> SpeechModel.isInstalled(context)
         Item.VOICE -> Kokoro.isInstalled(context)
@@ -76,20 +79,43 @@ object Setup {
                 ).show()
                 activity.startActivity(Intent(ACTION_ACCESSIBILITY_SETTINGS))
             }
-            Item.BACKGROUND -> {
-                // Some phones block the direct prompt; fall back to the battery list, then the app's own page.
-                val attempts = listOf(
-                    Intent(ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${activity.packageName}")),
-                    Intent(ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
-                    Intent(ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}")),
-                )
-                val opened = attempts.indexOfFirst { runCatching { activity.startActivity(it) }.isSuccess }
-                if (opened > 0) {
-                    Toast.makeText(activity, R.string.toast_battery, Toast.LENGTH_LONG).show()
-                }
+            Item.BACKGROUND -> if (!runCatching { activity.startActivity(Intent(ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) }.isSuccess) {
+                Toast.makeText(activity, R.string.ash_default_app_manual, Toast.LENGTH_LONG).show()
             }
             Item.WAKE_WORD, Item.SPEECH, Item.VOICE -> Downloads.start(activity.applicationContext, item)
         }
+    }
+
+    fun arm(activity: Activity, explain: Boolean) {
+        if (!isDone(activity, Item.MICROPHONE)) {
+            act(activity, Item.MICROPHONE)
+            return
+        }
+        if (!JarvisService.notificationsAvailable(activity)) {
+            Toast.makeText(activity, R.string.ash_arm_notifications, Toast.LENGTH_LONG).show()
+            runCatching {
+                activity.startActivity(Intent(ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName))
+            }
+            return
+        }
+        if (!isDone(activity, Item.WAKE_WORD) || !isDone(activity, Item.SPEECH)) {
+            Toast.makeText(activity, R.string.ash_arm_models, Toast.LENGTH_LONG).show()
+            (activity as? MainActivity)?.goTo(R.id.nav_settings)
+            return
+        }
+        fun start() {
+            if (!JarvisService.start(activity)) {
+                Toast.makeText(activity, R.string.ash_start_refused, Toast.LENGTH_LONG).show()
+            }
+        }
+        if (explain) AlertDialog.Builder(activity)
+            .setTitle(R.string.ash_arm)
+            .setMessage(R.string.ash_arm_explanation)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.allow) { _, _ -> start() }
+            .show()
+        else start()
     }
 
     private fun isAccessibilityEnabled(context: Context): Boolean {

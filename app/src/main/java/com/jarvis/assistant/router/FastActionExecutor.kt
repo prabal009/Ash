@@ -1,13 +1,18 @@
 package com.jarvis.assistant.router
 
-import android.annotation.SuppressLint
+import android.app.KeyguardManager
+import android.app.SearchManager
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Handler
@@ -15,20 +20,19 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.MediaStore
+import android.telecom.TelecomManager
 import android.util.Log
 import android.view.KeyEvent
 import com.jarvis.assistant.Settings
 import com.jarvis.assistant.accessibility.JarvisAccessibilityService
 import com.jarvis.assistant.agent.SensitiveActions
 import com.jarvis.assistant.ai.AiMode
-import com.jarvis.assistant.apps.AppAction
-import com.jarvis.assistant.apps.ScreenItem
-import com.jarvis.assistant.apps.YouTubeAction
 import com.jarvis.assistant.contacts.ContactEntry
 import com.jarvis.assistant.contacts.ContactMatcher
 import com.jarvis.assistant.contacts.ContactResolver
 import com.jarvis.assistant.contacts.PermissionActivity
 import com.jarvis.assistant.contacts.PhoneNumber
+import com.jarvis.assistant.media.MediaNotificationListener
 import com.jarvis.assistant.memory.MemoryStore
 import com.jarvis.assistant.memory.SensitiveFilter
 import com.jarvis.assistant.runtime.EmbeddedRuntime
@@ -42,7 +46,7 @@ import android.provider.Settings as AndroidSettings
 /**
  * Runs [FastCommand]s with direct Android APIs: intents, AudioManager, the camera flash, media keys and the
  * accessibility service. No language model is involved. Each action reports what actually happened, and checks the
- * result where Android lets it (app in front, volume level, torch state, music playing) before saying it worked.
+ * result where Android lets it. For request-only APIs, success means dispatch, not a verified effect.
  *
  * Call [execute] from a worker thread: some actions wait briefly to verify the outcome.
  */
@@ -61,7 +65,7 @@ class FastActionExecutor(
         val message: String,
         val app: AppEntry? = null,
         val how: String = "",
-        /** True when the action cannot be taken back (a call was placed). */
+        /** True when the action cannot be taken back. Opening the dialer does not place a call. */
         val irreversible: Boolean = false,
     )
 
@@ -80,66 +84,86 @@ class FastActionExecutor(
 
     private val resolver by lazy { ContactResolver(app) }
 
-    /**
-     * [asker] speaks a question and returns what the user answers (null if nothing). It is used for "which one?" and
-     * "call her?" questions. Without it, actions that need an answer do nothing risky.
-     */
+    // A separate overload preserves calls that pass `asker` as a trailing lambda.
     fun execute(cmd: FastCommand, asker: ((String) -> String?)? = null): Result = execute(cmd, {}, asker)
 
-    fun execute(cmd: FastCommand, recordStep: (String) -> Unit, asker: ((String) -> String?)?): Result = try {
-        run(cmd, recordStep, asker)
+    fun execute(cmd: FastCommand, recordStep: (String) -> Unit, asker: ((String) -> String?)?): Result =
+        execute(cmd, recordStep, asker) { true }
+
+    /**
+     * [canAct] checks that this request is still current. It is rechecked after questions/waits and before effects.
+     * [asker] returns the answer to a question, or null when no response is available.
+     */
+    fun execute(
+        cmd: FastCommand,
+        recordStep: (String) -> Unit,
+        asker: ((String) -> String?)?,
+        canAct: () -> Boolean,
+    ): Result = try {
+        val allowedWhileLocked = cmd is FastCommand.Media && cmd.app == null ||
+            cmd is FastCommand.Ask && cmd.kind == QueryKind.TIME
+        val check = { checkAuthorized(canAct, allowedWhileLocked) }
+        check()
+        run(cmd, recordStep, asker, check)
+    } catch (e: ActionBlocked) {
+        Result(true, false, e.message.orEmpty())
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        Result(true, false, "The request was interrupted.")
     } catch (e: SecurityException) {
-        Log.w(TAG, "${cmd.javaClass.simpleName} not permitted", e)
+        Log.w(TAG, "${cmd.javaClass.simpleName} not permitted (${e.javaClass.simpleName})")
         Result(true, false, "Android didn't allow that.")
     } catch (e: Exception) {
-        Log.w(TAG, "${cmd.javaClass.simpleName} failed", e)
+        Log.w(TAG, "${cmd.javaClass.simpleName} failed (${e.javaClass.simpleName})")
         Result(true, false, "Sorry, that didn't work.")
     }
 
-    private fun run(cmd: FastCommand, recordStep: (String) -> Unit, asker: ((String) -> String?)?): Result = when (cmd) {
-        is FastCommand.OpenApp -> openApp(cmd.query, asker)
-        is FastCommand.Press -> press(cmd.key)
-        is FastCommand.Scroll -> withPhoneControl { svc ->
+    private fun run(
+        cmd: FastCommand,
+        recordStep: (String) -> Unit,
+        asker: ((String) -> String?)?,
+        check: () -> Unit,
+    ): Result = when (cmd) {
+        is FastCommand.OpenApp -> openApp(cmd.query, asker, check)
+        is FastCommand.Press -> press(cmd.key, check)
+        is FastCommand.Scroll -> withPhoneControl(check) { svc ->
             val msg = svc.scroll(null, cmd.direction)
             Result(true, !msg.contains("failed"), if (msg.contains("failed")) "I couldn't scroll." else "Scrolled ${cmd.direction}.")
         }
-        is FastCommand.Volume -> volume(cmd)
-        is FastCommand.Flashlight -> flashlight(cmd)
-        is FastCommand.Media -> media(cmd.action)
-        is FastCommand.WebSearch -> webSearch(cmd)
-        is FastCommand.OpenSettings -> openSettings(cmd)
+        is FastCommand.Volume -> volume(cmd, check)
+        is FastCommand.Flashlight -> flashlight(cmd, check)
+        is FastCommand.Media -> media(cmd, asker, check)
+        is FastCommand.PlayMusic -> playMusic(cmd, asker, check)
+        is FastCommand.WebSearch -> webSearch(cmd, check)
+        is FastCommand.OpenSettings -> openSettings(cmd, check)
         FastCommand.OpenCamera -> {
-            val ok = startIntent(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))
+            val ok = startIntent(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA), check)
             Result(true, ok, if (ok) "Opening the camera." else "I couldn't open the camera.")
         }
-        is FastCommand.SetAlarm -> setAlarm(cmd)
-        is FastCommand.SetTimer -> setTimer(cmd)
-        is FastCommand.Dial -> {
-            val ok = startIntent(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(cmd.number))))
-            Result(true, ok, if (ok) "The dialer is open with that number. Tap call to place it." else "I couldn't open the dialer.")
-        }
-        is FastCommand.CallContact -> callContact(cmd.name, asker)
-        is FastCommand.PlayYouTube -> playYouTube(cmd.query, recordStep)
-        is FastCommand.TapText -> withPhoneControl { svc ->
+        is FastCommand.SetAlarm -> setAlarm(cmd, check)
+        is FastCommand.SetTimer -> setTimer(cmd, check)
+        is FastCommand.Dial -> confirmDial(cmd.number, null, asker, recordStep, check)
+        is FastCommand.CallContact -> callContact(cmd.name, asker, recordStep, check)
+        is FastCommand.TapText -> withPhoneControl(check) { svc ->
             val msg = svc.tapByText(cmd.text)
             Result(true, msg.startsWith("Tapped"), msg)
         }
-        is FastCommand.TypeText -> withPhoneControl { svc ->
+        is FastCommand.TypeText -> withPhoneControl(check) { svc ->
             val msg = try { svc.typeText(null, cmd.text, false) } catch (e: IllegalStateException) { e.message ?: "No text field is focused." }
             Result(true, msg.startsWith("Typed"), if (msg.startsWith("Typed")) "Typed it." else msg)
         }
-        FastCommand.Screenshot -> withPhoneControl { svc ->
+        FastCommand.Screenshot -> withPhoneControl(check) { svc ->
             val msg = svc.pressKey("screenshot")
             Result(true, msg.startsWith("Pressed"), if (msg.startsWith("Pressed")) "Taking a screenshot." else "I couldn't take a screenshot.")
         }
-        FastCommand.LockScreen -> withPhoneControl { svc ->
+        FastCommand.LockScreen -> withPhoneControl(check) { svc ->
             val msg = svc.pressKey("lock")
             Result(true, msg.startsWith("Pressed"), if (msg.startsWith("Pressed")) "Locking the screen." else "I couldn't lock the screen.")
         }
         is FastCommand.Ask -> ask(cmd.kind)
-        is FastCommand.SetMode -> setMode(cmd.mode)
-        is FastCommand.SetLanguage -> setLanguage(cmd.lang)
-        is FastCommand.RuntimeControl -> runtimeControl(cmd.action)
+        is FastCommand.SetMode -> setMode(cmd.mode, check)
+        is FastCommand.SetLanguage -> setLanguage(cmd.lang, check)
+        is FastCommand.RuntimeControl -> runtimeControl(cmd.action, check)
     }
 
     // ---- Apps ----
@@ -157,7 +181,7 @@ class FastActionExecutor(
         return list
     }
 
-    private fun openApp(query: String, asker: ((String) -> String?)?): Result {
+    private fun openApp(query: String, asker: ((String) -> String?)?, check: () -> Unit): Result {
         val m = AppMatcher.match(query, installedApps()) { phrase -> runCatching { memory()?.appAlias(phrase) }.getOrNull() }
         val entry = m.app
         if (entry == null) {
@@ -169,29 +193,32 @@ class FastActionExecutor(
         }
         // A match that only "sounds like" the name is confirmed first. A yes teaches Jarvis the name for next time.
         if (m.how == "sound" && asker != null) {
+            check()
             val answer = asker("Did you mean ${entry.label}?")
+            check()
             if (!SensitiveActions.isYes(answer)) return Result(true, true, "Okay, I won't open it.")
             learnAlias(query, entry)
         }
         val svc = a11y
-        val started = if (svc != null) svc.openPackage(entry.packageName, entry.activity) else startLaunchIntent(entry.packageName)
+        val started = if (svc != null) {
+            check()
+            svc.openPackage(entry.packageName, entry.activity)
+        } else {
+            val intent = app.packageManager.getLaunchIntentForPackage(entry.packageName)
+            intent != null && startIntent(intent, check)
+        }
         if (!started) return Result(true, false, "I couldn't open ${entry.label}.", entry, m.how)
         if (svc == null) {
-            return Result(true, false, "I tried to open ${entry.label}. Turn on phone control in Jarvis so I can open apps reliably.", entry, m.how)
+            return Result(true, true, "I asked Android to open ${entry.label}.", entry, m.how)
         }
         val shown = svc.waitForForeground(entry.packageName, FOREGROUND_WAIT_MS)
         val msg = if (shown) "Opened ${entry.label}." else "I asked Android to open ${entry.label}, but I couldn't confirm it came to the front."
         return Result(true, true, msg, entry, m.how)
     }
 
-    private fun startLaunchIntent(pkg: String): Boolean {
-        val intent = app.packageManager.getLaunchIntentForPackage(pkg) ?: return false
-        return startIntent(intent)
-    }
-
     // ---- Navigation and screen ----
 
-    private fun press(key: String): Result = withPhoneControl { svc ->
+    private fun press(key: String, check: () -> Unit): Result = withPhoneControl(check) { svc ->
         val msg = svc.pressKey(key)
         val ok = msg.startsWith("Pressed")
         val say = when (key) {
@@ -205,17 +232,19 @@ class FastActionExecutor(
         Result(true, ok, if (ok) say else "I couldn't do that.")
     }
 
-    private inline fun withPhoneControl(block: (JarvisAccessibilityService) -> Result): Result {
-        val svc = a11y ?: return Result(true, false, "Please turn on phone control in the Jarvis app first.")
+    private inline fun withPhoneControl(check: () -> Unit, block: (JarvisAccessibilityService) -> Result): Result {
+        val svc = a11y ?: return Result(true, false, "Please turn on phone control in the Ash app first.")
+        check()
         return block(svc)
     }
 
     // ---- Sound, flashlight, media ----
 
-    private fun volume(cmd: FastCommand.Volume): Result {
+    private fun volume(cmd: FastCommand.Volume, check: () -> Unit): Result {
         val am = app.getSystemService(AudioManager::class.java)
         val stream = AudioManager.STREAM_MUSIC
         val max = am.getStreamMaxVolume(stream).coerceAtLeast(1)
+        check()
         when (cmd.change) {
             VolumeChange.UP -> am.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
             VolumeChange.DOWN -> am.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
@@ -230,7 +259,7 @@ class FastActionExecutor(
         return Result(true, true, if (am.isStreamMute(stream)) "Muted." else "Volume is $percent percent.")
     }
 
-    private fun flashlight(cmd: FastCommand.Flashlight): Result {
+    private fun flashlight(cmd: FastCommand.Flashlight, check: () -> Unit): Result {
         val cm = app.getSystemService(CameraManager::class.java)
         val cameraId = cm.cameraIdList.firstOrNull { id ->
             val c = cm.getCameraCharacteristics(id)
@@ -243,36 +272,150 @@ class FastActionExecutor(
             Thread.sleep(200) // the callback reports the current state shortly after registering
         }
         val want = cmd.on ?: !torchOn
+        check()
         cm.setTorchMode(cameraId, want)
         waitUntil(800) { torchOn == want }
         return if (torchOn == want) Result(true, true, if (want) "Flashlight on." else "Flashlight off.")
         else Result(true, false, "I couldn't turn the flashlight ${if (want) "on" else "off"}.")
     }
 
-    private fun media(action: MediaAction): Result {
-        val am = app.getSystemService(AudioManager::class.java)
-        val playing = am.isMusicActive
-        if (!playing && action != MediaAction.PLAY) {
-            return Result(true, action == MediaAction.PAUSE, "Nothing is playing right now.")
+    private fun media(cmd: FastCommand.Media, asker: ((String) -> String?)?, check: () -> Unit): Result {
+        val sessions = if (isUnlocked()) activeSessions() else emptyList()
+        val target = cmd.app?.let {
+            mediaApp(it, sessions, emptyList(), asker, check) ?: return unknownMediaApp()
         }
+        val actionFlag = when (cmd.action) {
+            MediaAction.PLAY -> PlaybackState.ACTION_PLAY
+            MediaAction.PAUSE -> PlaybackState.ACTION_PAUSE
+            MediaAction.NEXT -> PlaybackState.ACTION_SKIP_TO_NEXT
+            MediaAction.PREVIOUS -> PlaybackState.ACTION_SKIP_TO_PREVIOUS
+        }
+        val players = sessions.filter { (target == null || it.packageName == target.packageName) && it.supports(actionFlag) }
+        if (players.isEmpty()) {
+            if (target == null) return globalMedia(cmd.action, check)
+            return Result(true, false, "I couldn't find an active ${target.label} session that supports this. Open the player and check Ash's optional notification access.")
+        }
+
+        val checkSession = {
+            check()
+            if (!isUnlocked()) throw ActionBlocked("Unlock your phone and try again.")
+        }
+        val selected = choosePlayer(players, { appLabel(it.packageName) }, asker, checkSession)
+            ?: return Result(true, false, "I didn't select a player. Name the app you want to control.")
+        val label = appLabel(selected.packageName)
+        val active = currentSession(selected, actionFlag, checkSession) ?: return unavailableSession()
+        val expected = when (cmd.action) {
+            MediaAction.PLAY -> PlaybackState.STATE_PLAYING
+            MediaAction.PAUSE -> PlaybackState.STATE_PAUSED
+            else -> null
+        }
+        val observed = if (cmd.action == MediaAction.PLAY) "playing" else "paused"
+        if (expected != null && active.playbackState?.state == expected) {
+            checkSession()
+            return Result(true, true, "$label reports that it's already $observed.")
+        }
+        val controls = active.transportControls
+        checkSession()
+        when (cmd.action) {
+            MediaAction.PLAY -> controls.play()
+            MediaAction.PAUSE -> controls.pause()
+            MediaAction.NEXT -> controls.skipToNext()
+            MediaAction.PREVIOUS -> controls.skipToPrevious()
+        }
+        if (expected != null && waitUntil(900) { isUnlocked() && active.playbackState?.state == expected }) {
+            checkSession()
+            return Result(true, true, "$label reports that it's $observed.")
+        }
+        return if (isUnlocked()) mediaDispatched(cmd.action, label) else mediaDispatched(cmd.action)
+    }
+
+    private fun globalMedia(action: MediaAction, check: () -> Unit): Result {
+        val am = app.getSystemService(AudioManager::class.java)
         val code = when (action) {
             MediaAction.PLAY -> KeyEvent.KEYCODE_MEDIA_PLAY
             MediaAction.PAUSE -> KeyEvent.KEYCODE_MEDIA_PAUSE
             MediaAction.NEXT -> KeyEvent.KEYCODE_MEDIA_NEXT
             MediaAction.PREVIOUS -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
         }
+        check()
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
-        return when (action) {
-            MediaAction.PAUSE ->
-                if (waitUntil(900) { !am.isMusicActive }) Result(true, true, "Paused.")
-                else Result(true, false, "I sent pause, but music is still playing.")
-            MediaAction.PLAY ->
-                if (playing || waitUntil(1500) { am.isMusicActive }) Result(true, true, "Playing.")
-                else Result(true, false, "I sent play, but nothing started. Open your music app first.")
-            MediaAction.NEXT -> Result(true, true, "Next track.")
-            MediaAction.PREVIOUS -> Result(true, true, "Previous track.")
+        return mediaDispatched(action)
+    }
+
+    private fun mediaDispatched(action: MediaAction, label: String = "Android's media controls"): Result {
+        val request = when (action) {
+            MediaAction.PLAY -> "play"
+            MediaAction.PAUSE -> "pause"
+            MediaAction.NEXT -> "next track"
+            MediaAction.PREVIOUS -> "previous track"
         }
+        return Result(true, true, "I sent the $request request to $label, but couldn't verify playback.")
+    }
+
+    private fun activeSessions(): List<MediaController> = try {
+        val manager = app.getSystemService(MediaSessionManager::class.java)
+        val listener = ComponentName(app, MediaNotificationListener::class.java)
+        // Android authorizes this only while the user has enabled this notification listener.
+        manager.getActiveSessions(listener).filterNot { it.packageName == app.packageName }
+    } catch (_: SecurityException) {
+        emptyList()
+    }
+
+    private fun MediaController.supports(action: Long): Boolean =
+        (playbackState?.actions ?: 0L) and action != 0L
+
+    private fun currentSession(controller: MediaController, action: Long, check: () -> Unit): MediaController? {
+        check()
+        return activeSessions().firstOrNull { it.sessionToken == controller.sessionToken && it.supports(action) }
+    }
+
+    private fun unavailableSession() = Result(true, false, "That media session is no longer available.")
+
+    private fun appLabel(packageName: String): String = try {
+        val pm = app.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+    } catch (_: PackageManager.NameNotFoundException) {
+        packageName
+    }
+
+    private fun mediaApp(
+        name: String,
+        sessions: List<MediaController>,
+        handlers: List<AppEntry>,
+        asker: ((String) -> String?)?,
+        check: () -> Unit,
+    ): AppEntry? {
+        val apps = (installedApps() + handlers + sessions.map { AppEntry(appLabel(it.packageName), it.packageName) })
+            .distinctBy { it.packageName }
+        val match = AppMatcher.match(name, apps) { runCatching { memory()?.appAlias(it) }.getOrNull() }
+        if (match.ambiguous.isNotEmpty()) return choosePlayer(match.ambiguous, AppEntry::label, asker, check)
+        val entry = match.app ?: return null
+        if (match.how in setOf("exact", "learned", "builtin")) return entry
+        check()
+        val answer = asker?.invoke("Did you mean ${entry.label}?")
+        check()
+        return entry.takeIf { SensitiveActions.isYes(answer) }
+    }
+
+    private fun unknownMediaApp() = Result(true, false, "I couldn't identify that media app. Say its full name.")
+
+    private fun <T> choosePlayer(
+        players: List<T>,
+        label: (T) -> String,
+        asker: ((String) -> String?)?,
+        check: () -> Unit,
+    ): T? {
+        if (players.size <= 1) return players.singleOrNull()
+        if (asker == null || players.size > MAX_CHOICES) return null
+        val labels = players.map(label)
+        check()
+        val answer = asker("Which player? ${numbered(labels)}")
+        check()
+        Lexicon.optionIndex(answer)?.let { return players.getOrNull(it) }
+        val name = Lexicon.normalize(answer.orEmpty())
+        val index = labels.indices.singleOrNull { Lexicon.normalize(labels[it]) == name } ?: return null
+        return players[index]
     }
 
     private fun waitUntil(ms: Long, condition: () -> Boolean): Boolean {
@@ -286,16 +429,16 @@ class FastActionExecutor(
 
     // ---- Search, settings, clock ----
 
-    private fun webSearch(cmd: FastCommand.WebSearch): Result {
+    private fun webSearch(cmd: FastCommand.WebSearch, check: () -> Unit): Result {
         val q = URLEncoder.encode(cmd.query, "UTF-8")
         val youtube = cmd.site == "youtube"
         val url = if (youtube) "https://www.youtube.com/results?search_query=$q" else "https://www.google.com/search?q=$q"
-        val ok = startIntent(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        val ok = startIntent(Intent(Intent.ACTION_VIEW, Uri.parse(url)), check)
         val where = if (youtube) "YouTube" else "Google"
         return Result(true, ok, if (ok) "Searching $where for ${cmd.query}." else "I couldn't start the search.")
     }
 
-    private fun openSettings(cmd: FastCommand.OpenSettings): Result {
+    private fun openSettings(cmd: FastCommand.OpenSettings, check: () -> Unit): Result {
         val action = when (cmd.page) {
             "wifi" -> AndroidSettings.ACTION_WIFI_SETTINGS
             "bluetooth" -> AndroidSettings.ACTION_BLUETOOTH_SETTINGS
@@ -314,7 +457,7 @@ class FastActionExecutor(
             "notification" -> "android.settings.ALL_APPS_NOTIFICATION_SETTINGS"
             else -> AndroidSettings.ACTION_SETTINGS
         }
-        val ok = startIntent(Intent(action)) || startIntent(Intent(AndroidSettings.ACTION_SETTINGS))
+        val ok = startIntent(Intent(action), check) || startIntent(Intent(AndroidSettings.ACTION_SETTINGS), check)
         val name = cmd.page.replaceFirstChar { it.uppercase() }
         return when {
             !ok -> Result(true, false, "I couldn't open settings.")
@@ -323,24 +466,24 @@ class FastActionExecutor(
         }
     }
 
-    private fun setAlarm(cmd: FastCommand.SetAlarm): Result {
+    private fun setAlarm(cmd: FastCommand.SetAlarm, check: () -> Unit): Result {
         val intent = Intent(AlarmClock.ACTION_SET_ALARM)
             .putExtra(AlarmClock.EXTRA_HOUR, cmd.hour)
             .putExtra(AlarmClock.EXTRA_MINUTES, cmd.minute)
-            .putExtra(AlarmClock.EXTRA_MESSAGE, "Jarvis")
+            .putExtra(AlarmClock.EXTRA_MESSAGE, "Ash")
             .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-        val ok = startIntent(intent)
+        val ok = startIntent(intent, check)
         val h12 = if (cmd.hour % 12 == 0) 12 else cmd.hour % 12
         val label = "%d:%02d %s".format(Locale.US, h12, cmd.minute, if (cmd.hour < 12) "AM" else "PM")
         return Result(true, ok, if (ok) "I've asked your clock app to set an alarm for $label." else "I couldn't find a clock app to set the alarm.")
     }
 
-    private fun setTimer(cmd: FastCommand.SetTimer): Result {
+    private fun setTimer(cmd: FastCommand.SetTimer, check: () -> Unit): Result {
         val intent = Intent(AlarmClock.ACTION_SET_TIMER)
             .putExtra(AlarmClock.EXTRA_LENGTH, cmd.seconds)
-            .putExtra(AlarmClock.EXTRA_MESSAGE, "Jarvis")
+            .putExtra(AlarmClock.EXTRA_MESSAGE, "Ash")
             .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-        val ok = startIntent(intent)
+        val ok = startIntent(intent, check)
         val minutes = cmd.seconds / 60
         val label = when {
             cmd.seconds % 3600 == 0 -> "${cmd.seconds / 3600} hour"
@@ -350,115 +493,134 @@ class FastActionExecutor(
         return Result(true, ok, if (ok) "I've asked your clock app to start a $label timer." else "I couldn't find a clock app to start the timer.")
     }
 
-    // ---- Actions inside other apps ----
+    // ---- Music search ----
 
-    /**
-     * Searches YouTube in the YouTube app, taps the first real video result and checks whether sound starts. It reports
-     * what it could confirm: a result picked, and audio playing. YouTube may show an ad first, ask to sign in, or change
-     * its screens; in those cases the answer says so instead of claiming playback.
-     */
-    private fun playYouTube(rawQuery: String, recordStep: (String) -> Unit): Result {
-        val query = YouTubeAction.cleanQuery(rawQuery)
-        val svc = a11y ?: return Result(true, false, "Please turn on phone control in the Jarvis app first.")
-        val installed = installedApps().any { it.packageName == YouTubeAction.packageName }
-        if (!installed) {
-            val url = "https://www.youtube.com/results?search_query=" + URLEncoder.encode(query, "UTF-8")
-            val ok = startIntent(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            return Result(true, ok, if (ok) "YouTube isn't installed, so I searched for $query in the browser. I can't start playback there." else "I couldn't open YouTube.")
+    private fun playMusic(cmd: FastCommand.PlayMusic, asker: ((String) -> String?)?, check: () -> Unit): Result {
+        val extras = android.os.Bundle().apply {
+            putString(SearchManager.QUERY, cmd.query)
+            putString(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
         }
-        val search = Intent(Intent.ACTION_SEARCH).setPackage(YouTubeAction.packageName).putExtra(android.app.SearchManager.QUERY, query)
-        if (!svc.launch(search)) return Result(true, false, "I couldn't open YouTube's search.")
-        recordStep("Requested a search in YouTube.")
-        if (!svc.waitForForeground(YouTubeAction.packageName, 6_000)) {
-            return Result(true, false, "I asked YouTube to search for $query, but I couldn't confirm that it opened.")
+        val intent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).putExtras(extras)
+        val pm = app.packageManager
+        val handlers = pm.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            .filter { it.activityInfo.exported && it.activityInfo.packageName != app.packageName }
+            .map { AppEntry(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
+            .distinctBy { it.packageName }
+        val sessions = activeSessions()
+        val target = cmd.app?.let { mediaApp(it, sessions, handlers, asker, check) ?: return unknownMediaApp() }
+        val action = PlaybackState.ACTION_PLAY_FROM_SEARCH
+        val players = sessions.filter { (target == null || it.packageName == target.packageName) && it.supports(action) }
+        if (players.isNotEmpty()) {
+            val selected = choosePlayer(players, { appLabel(it.packageName) }, asker, check)
+                ?: return Result(true, false, "I didn't select a player. Name the app you want to search.")
+            val label = appLabel(selected.packageName)
+            val active = currentSession(selected, action, check) ?: return unavailableSession()
+            val controls = active.transportControls
+            check()
+            controls.playFromSearch(cmd.query, extras)
+            return Result(true, true, "I sent a playback search to $label, but couldn't verify what played.")
         }
-        recordStep("Opened YouTube.")
-        val pick = waitForResult(svc, YouTubeAction, 8_000)
-            ?: return Result(true, false, "YouTube is showing results for $query, but I couldn't pick a video myself. It's on the screen.")
-        recordStep("Found a video in the search results.")
-        val tapped = svc.tap(pick.first)
-        if (!tapped.startsWith("Tapped")) return Result(true, false, "I found a video but couldn't tap it.")
-        val am = app.getSystemService(AudioManager::class.java)
-        recordStep("Tapped the video.")
-        val title = pick.second
-        return if (waitUntil(9_000) { am.isMusicActive }) Result(true, true, "Playing $title.")
-        else Result(true, false, "I opened $title, but I can't confirm that it's playing. It may be loading or showing an ad.")
-    }
 
-    /** Reads the screen every half second until [action] finds a result to tap. Returns the element id and a title. */
-    private fun waitForResult(svc: JarvisAccessibilityService, action: AppAction, timeoutMs: Long): Pair<Int, String>? {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val shot = svc.readScreen(150)
-            if (shot.foregroundPackage == action.packageName) {
-                val items = shot.elements.map { (id, node) ->
-                    ScreenItem(id, (node.contentDescription ?: node.text)?.toString().orEmpty(), node.isClickable)
-                }
-                action.pickResult(items)?.let { return it.id to action.titleOf(it) }
-            }
-            Thread.sleep(500)
+        val supported = if (target == null) handlers else handlers.filter { it.packageName == target.packageName }
+        if (supported.isEmpty()) {
+            return Result(true, false, if (target == null) "I couldn't find an app that supports playback search."
+                else "${target.label} doesn't have an available playback search. Try another music app.")
         }
-        return null
+        val selected = choosePlayer(supported, AppEntry::label, asker, check)
+            ?: return Result(true, false, "I didn't select a player. Name the app you want to search.")
+        val ok = startIntent(intent.setPackage(selected.packageName), check, direct = true)
+        return Result(true, ok, if (ok) "I requested a playback search in ${selected.label}, but couldn't verify what played."
+            else "I couldn't send the playback search to ${selected.label}.")
     }
 
     // ---- Calling ----
 
-    private fun askForPermissions() {
-        startIntent(PermissionActivity.intent(app))
-    }
-
-    private fun callContact(name: String, asker: ((String) -> String?)?): Result {
+    private fun callContact(
+        name: String,
+        asker: ((String) -> String?)?,
+        recordStep: (String) -> Unit,
+        check: () -> Unit,
+    ): Result {
         if (!resolver.hasContactsPermission()) {
-            askForPermissions()
-            return Result(true, false, "I need permission to read your contacts before I can call $name. I've opened the permission screen.")
+            val sent = startIntent(PermissionActivity.intent(app), check, direct = true)
+            return Result(true, false, if (sent) "I requested contacts access. If you grant it, ask again."
+                else "I need contacts access for names. Grant it in Ash's settings or dial in the Phone app.")
         }
         val match = ContactMatcher.find(name, resolver.contacts())
+        check()
         val contact: ContactEntry = when {
-            match.matches.isEmpty() -> return Result(true, false, "I couldn't find anyone called $name in your contacts.")
+            match.matches.isEmpty() -> return Result(true, false, "I couldn't find that contact.")
             match.ambiguous -> {
-                val options = match.matches.joinToString(" or ") { it.name }
-                if (asker == null) return Result(true, false, "$name matches $options. Please say the full name.")
-                val answer = asker("Which one: $options?")
+                if (asker == null || match.matches.size > MAX_CHOICES) {
+                    return Result(true, false, "Several contacts match. Please say the full name or select the contact in the Phone app.")
+                }
+                val labels = match.matches.map { person ->
+                    val duplicates = match.matches.any { it.id != person.id && it.name.equals(person.name, ignoreCase = true) }
+                    if (!duplicates) person.name else person.numbers.joinToString(", ", "${person.name}, ") { describeNumber(it) }
+                }
+                check()
+                val answer = asker("Which contact? ${numbered(labels)}")
+                check()
                 ContactMatcher.pick(answer.orEmpty(), match.matches)
-                    ?: return Result(true, false, "I'm not sure which one you meant, so I haven't called anyone.")
+                    ?: return Result(true, false, "I couldn't identify the contact, so I didn't open the dialer.")
             }
             else -> match.matches.single()
         }
-        val number = ContactMatcher.bestNumber(contact) ?: return Result(true, false, "${contact.name} has no phone number saved.")
-
-        // A call is never placed on a guess: sound-alike matches are always confirmed, and so is everything else unless
-        // the user turned confirmations off. Without a way to ask, the dialer is opened instead of calling.
-        val weak = match.how in setOf("fuzzy", "sound", "prefix")
-        if (settings.confirmSensitive || weak) {
-            if (asker == null) return dialInstead(contact, number)
-            val answer = asker("Call ${ContactMatcher.describe(contact, number)}?")
-            if (!SensitiveActions.isYes(answer)) return Result(true, true, "Okay, I won't call.")
+        val numbers = contact.numbers
+        val number = when {
+            numbers.isEmpty() -> return Result(true, false, "${contact.name} has no saved number.")
+            numbers.size == 1 -> numbers.single()
+            asker == null || numbers.size > MAX_CHOICES -> return Result(true, false, "${contact.name} has several numbers. Select one in the Phone app.")
+            else -> {
+                check()
+                val answer = asker("Which number for ${contact.name}? ${numbered(numbers.map(::describeNumber))}")
+                check()
+                ContactMatcher.pickNumber(answer, numbers)
+                    ?: return Result(true, false, "I couldn't identify the number, so I didn't open the dialer.")
+            }
         }
-        return placeCall(contact, number)
+        return confirmDial(number.number, contact, asker, recordStep, check, number.type)
     }
 
-    private fun uriFor(n: PhoneNumber) = Uri.parse("tel:" + Uri.encode(n.number.filter { it.isDigit() || it == '+' }))
+    private fun describeNumber(number: PhoneNumber): String =
+        "${number.type} ${ContactMatcher.dialableNumber(number.number) ?: "(unsupported number)"}"
 
-    private fun dialInstead(contact: ContactEntry, number: PhoneNumber): Result {
-        val ok = startIntent(Intent(Intent.ACTION_DIAL, uriFor(number)))
-        return Result(true, ok, if (ok) "I opened the dialer with ${contact.name}'s number. Tap call to place it." else "I couldn't open the dialer.")
+    private fun confirmDial(
+        raw: String,
+        contact: ContactEntry?,
+        asker: ((String) -> String?)?,
+        recordStep: (String) -> Unit,
+        check: () -> Unit,
+        type: String? = null,
+    ): Result {
+        val number = ContactMatcher.dialableNumber(raw)
+            ?: return Result(true, false, "I can't open the dialer with that number. Enter it in the Phone app.")
+        if (asker == null) return Result(true, false, "I need confirmation before opening the dialer.")
+        val target = if (contact == null) number else "${contact.name}, $type $number"
+        check()
+        val answer = asker("Open the dialer for $target? You will place the call yourself.")
+        val confirmedAt = SystemClock.elapsedRealtime()
+        check()
+        if (!ContactMatcher.confirmsDial(answer)) return Result(true, false, "I didn't open the dialer.")
+        if (contact != null && !resolver.stillHasNumber(contact, number)) {
+            return Result(true, false, "The contact or number is no longer available. Please ask again.")
+        }
+        val dialer = app.getSystemService(TelecomManager::class.java)?.defaultDialerPackage
+        val intent = Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", number, null)).setPackage(dialer)
+        val ok = startIntent(intent, {
+            check()
+            if (SystemClock.elapsedRealtime() - confirmedAt >= DIAL_APPROVAL_MS) {
+                throw ActionBlocked("The dialer confirmation expired. Please ask again.")
+            }
+            recordStep("Approved dispatch of the dialer request.")
+            check()
+        }, direct = true)
+        return Result(true, ok, if (ok) "I asked Android to open the dialer. Tap Call there to place the call."
+            else "I couldn't open the dialer. No call was placed.")
     }
 
-    // CALL_PHONE is checked through ContactResolver.hasCallPermission() just below; lint cannot see through that.
-    @SuppressLint("MissingPermission")
-    private fun placeCall(contact: ContactEntry, number: PhoneNumber): Result {
-        if (!resolver.hasCallPermission()) {
-            askForPermissions()
-            val r = dialInstead(contact, number)
-            return r.copy(message = if (r.success) "I'm not allowed to place calls yet, so I opened the dialer with ${contact.name}'s number. Tap call." else r.message)
-        }
-        if (!startIntent(Intent(Intent.ACTION_CALL, uriFor(number)))) return Result(true, false, "I couldn't start the call to ${contact.name}.")
-        if (!resolver.hasPhoneStatePermission()) {
-            return Result(true, true, "I've asked Android to call ${contact.name}. I can't confirm that it connected.", irreversible = true)
-        }
-        return if (waitUntil(7_000) { resolver.inCall() }) Result(true, true, "Calling ${contact.name}.", irreversible = true)
-        else Result(true, false, "I asked Android to call ${contact.name}, but the call didn't start.", irreversible = true)
-    }
+    private fun numbered(labels: List<String>): String =
+        labels.mapIndexed { index, label -> "${index + 1}, $label" }.joinToString("; ")
 
     // ---- Things Jarvis can answer itself ----
 
@@ -472,7 +634,8 @@ class FastActionExecutor(
         }
     }
 
-    private fun setMode(mode: AiMode): Result {
+    private fun setMode(mode: AiMode, check: () -> Unit): Result {
+        check()
         settings.aiMode = mode
         val msg = when (mode) {
             AiMode.AUTO -> "Automatic mode. I'll pick the local or cloud model for each request."
@@ -482,7 +645,7 @@ class FastActionExecutor(
         return Result(true, true, msg)
     }
 
-    private fun runtimeControl(action: RuntimeAction): Result {
+    private fun runtimeControl(action: RuntimeAction, check: () -> Unit): Result {
         val rt = EmbeddedRuntime.get(app)
         if (!rt.isSupported()) return Result(true, false, "This build doesn't include the on-device model runtime.")
         val s = rt.status
@@ -491,6 +654,7 @@ class FastActionExecutor(
                 rt.hasModel() -> Result(true, true, "The on-device model is already installed.")
                 s.phase == EmbeddedRuntime.Phase.DOWNLOADING -> Result(true, true, "It's already downloading${if (s.percent >= 0) ", ${s.percent} percent done" else ""}.")
                 else -> {
+                    check()
                     rt.startDownloadIfNeeded(allowMobileData = true) // the user asked for it explicitly
                     Result(true, true, "Starting the download of the on-device model, about 1 gigabyte. I'll tell you when it's ready.")
                 }
@@ -507,7 +671,8 @@ class FastActionExecutor(
         }
     }
 
-    private fun setLanguage(lang: String): Result {
+    private fun setLanguage(lang: String, check: () -> Unit): Result {
+        check()
         settings.speechLanguage = lang
         return if (lang == "hi") {
             Result(true, true, "Okay. I'll listen for Hindi and Hinglish with Google speech recognition, and answer in English.")
@@ -545,7 +710,7 @@ class FastActionExecutor(
                 val items = store.all()
                 if (items.isEmpty()) Result(true, true, "I haven't saved anything yet.")
                 else Result(true, true, "I remember ${items.size} ${if (items.size == 1) "thing" else "things"}. " +
-                    "The latest: ${items.take(3).joinToString("; ") { it.title }}. Open Memories in Jarvis to see or change them.")
+                    "The latest: ${items.take(3).joinToString("; ") { it.title }}. Open Memories in Ash to see or change them.")
             }
         }
     }
@@ -576,8 +741,22 @@ class FastActionExecutor(
 
     // ---- helpers ----
 
-    private fun startIntent(intent: Intent): Boolean {
-        a11y?.let { return it.launch(intent) }
+    private class ActionBlocked(message: String) : RuntimeException(message)
+
+    private fun isUnlocked(): Boolean =
+        app.getSystemService(KeyguardManager::class.java)?.let { !it.isDeviceLocked && !it.isKeyguardLocked } == true
+
+    private fun checkAuthorized(canAct: () -> Boolean, allowLocked: Boolean = false) {
+        if (!canAct()) throw ActionBlocked("The request is no longer active.")
+        if (!allowLocked && !isUnlocked()) throw ActionBlocked("Unlock your phone and try again.")
+    }
+
+    private fun startIntent(intent: Intent, check: () -> Unit, direct: Boolean = false): Boolean {
+        if (!direct) a11y?.let {
+            check()
+            return it.launch(intent)
+        }
+        check()
         return try {
             app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             true
@@ -592,5 +771,7 @@ class FastActionExecutor(
         private const val TAG = "FastAction"
         private const val APP_CACHE_MS = 30_000L
         private const val FOREGROUND_WAIT_MS = 3_000L
+        private const val DIAL_APPROVAL_MS = 10_000L
+        private const val MAX_CHOICES = 5
     }
 }

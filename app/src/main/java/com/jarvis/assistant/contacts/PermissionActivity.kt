@@ -2,21 +2,23 @@ package com.jarvis.assistant.contacts
 
 import android.Manifest
 import android.app.Activity
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 
-/**
- * A see-through screen that shows Android's permission dialog for contacts and calling, then closes. Jarvis opens it
- * the first time you ask it to call someone, and the "Allow contacts and calling" button in Settings opens it too.
- */
+/** Presents the system's contacts permission prompt, without retaining a pending dial request. */
 class PermissionActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val wanted = intent.getStringArrayExtra(EXTRA_PERMISSIONS) ?: DEFAULT_PERMISSIONS
-        val missing = wanted.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isEmpty()) finish() else requestPermissions(missing.toTypedArray(), REQUEST)
+        if (getSystemService(KeyguardManager::class.java)?.isKeyguardLocked != false ||
+            checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+        ) {
+            finish()
+        } else if (savedInstanceState == null) {
+            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), REQUEST)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -25,18 +27,9 @@ class PermissionActivity : Activity() {
     }
 
     companion object {
-        private const val EXTRA_PERMISSIONS = "permissions"
         private const val REQUEST = 41
 
-        /** Contacts to find the person, call to place the call, phone state to confirm that the call started. */
-        val DEFAULT_PERMISSIONS = arrayOf(
-            Manifest.permission.READ_CONTACTS,
-            Manifest.permission.CALL_PHONE,
-            Manifest.permission.READ_PHONE_STATE,
-        )
-
         fun intent(context: Context): Intent = Intent(context, PermissionActivity::class.java)
-            .putExtra(EXTRA_PERMISSIONS, DEFAULT_PERMISSIONS)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }

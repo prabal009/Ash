@@ -1,7 +1,9 @@
 package com.jarvis.assistant
 
+import android.app.KeyguardManager
 import android.content.Context
 import com.jarvis.assistant.ai.AiMode
+import com.jarvis.assistant.ai.Endpoints
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -45,12 +47,14 @@ data class ModelProfile(
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("name", name).put("provider", providerId).put("base", baseUrl)
-        .put("key", apiKey).put("model", model).put("effort", effort)
+        .put("model", model).put("effort", effort)
+
+    override fun toString() = "ModelProfile(credentials redacted)"
 
     companion object {
-        fun fromJson(o: JSONObject) = ModelProfile(
+        fun fromJson(o: JSONObject, apiKey: String = "") = ModelProfile(
             o.getString("id"), o.optString("name"), o.optString("provider", "custom"), o.optString("base"),
-            o.optString("key"), o.optString("model"), o.optString("effort", "medium"),
+            apiKey, o.optString("model"), o.optString("effort", "medium"),
         )
     }
 }
@@ -63,10 +67,15 @@ data class ProviderConfig(
     val model: String,
     /** Claude only: "low" | "medium" | "high" | "xhigh" | "max" | "" (omit). */
     val effort: String,
-)
+) {
+    override fun toString() = "ProviderConfig(credentials redacted)"
+}
 
-class Settings(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+class Settings internal constructor(context: Context, private val credentials: ProviderCredentials) {
+    constructor(context: Context) : this(context, ProviderCredentials())
+
+    private val app = context.applicationContext
+    private val prefs = app.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
 
     var maxSteps: Int
         get() = prefs.getInt("max_steps", 40)
@@ -122,60 +131,137 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("fallback", true)
         set(v) = prefs.edit().putBoolean("fallback", v).apply()
 
-    fun profiles(): List<ModelProfile> {
-        migrateLegacyProvider()
-        val arr = JSONArray(prefs.getString("profiles", "[]"))
-        return (0 until arr.length()).map { ModelProfile.fromJson(arr.getJSONObject(it)) }
-    }
+    fun profiles(): List<ModelProfile> = runCatching {
+        val arr = profileMetadata()
+        List(arr.length()) { i ->
+            val profile = arr.getJSONObject(i)
+            ModelProfile.fromJson(profile, secret(profileSlot(profile.getString("id"))))
+        }
+    }.getOrDefault(emptyList())
 
     var primaryId: String?
-        get() = prefs.getString("primary", null)?.takeIf { id -> profiles().any { it.id == id } } ?: profiles().firstOrNull()?.id
+        get() = primary()?.id
         set(v) = prefs.edit().putString("primary", v).apply()
 
-    fun primary(): ModelProfile? = profiles().let { all -> all.firstOrNull { it.id == primaryId } ?: all.firstOrNull() }
+    fun primary(): ModelProfile? = primaryIn(profiles())
+
+    private fun primaryIn(all: List<ModelProfile>): ModelProfile? {
+        val selected = prefs.getString("primary", null)
+        return all.firstOrNull { it.id == selected } ?: all.firstOrNull()
+    }
 
     /** Primary first, then the others in the order they were added. */
     fun modelsInOrder(): List<ModelProfile> {
         val all = profiles()
-        val p = primary() ?: return all
+        val p = primaryIn(all) ?: return all
         return listOf(p) + all.filter { it.id != p.id }
     }
 
-    fun saveProfile(profile: ModelProfile) {
-        val all = profiles().toMutableList()
-        val i = all.indexOfFirst { it.id == profile.id }
-        if (i >= 0) all[i] = profile else all += profile
-        writeProfiles(all)
-        if (all.size == 1) primaryId = profile.id
+    fun saveProfile(profile: ModelProfile): Boolean = synchronized(CREDENTIALS_LOCK) {
+        if (!migrateProviderCredentials()) return@synchronized false
+        runCatching {
+            val arr = profileMetadata()
+            val index = (0 until arr.length()).firstOrNull { arr.getJSONObject(it).getString("id") == profile.id }
+            arr.put(index ?: arr.length(), profile.toJson())
+            val edit = prefs.edit().putString("profiles", arr.toString())
+            if (arr.length() == 1) edit.putString("primary", profile.id)
+            putSecret(edit, profileSlot(profile.id), profile.apiKey)
+            edit.commit()
+        }.getOrDefault(false)
     }
 
-    fun deleteProfile(id: String) {
-        writeProfiles(profiles().filter { it.id != id })
-        if (prefs.getString("primary", null) == id) primaryId = profiles().firstOrNull()?.id
+    fun deleteProfile(id: String): Boolean = synchronized(CREDENTIALS_LOCK) {
+        if (!migrateProviderCredentials()) return@synchronized false
+        runCatching {
+            val arr = profileMetadata()
+            val index = (0 until arr.length()).firstOrNull { arr.getJSONObject(it).getString("id") == id }
+            if (index != null) arr.remove(index)
+            val edit = prefs.edit().putString("profiles", arr.toString()).remove(profileSlot(id))
+            if (prefs.getString("primary", null) == id) edit.putString("primary", arr.optJSONObject(0)?.getString("id"))
+            edit.commit()
+        }.getOrDefault(false)
     }
 
-    private fun writeProfiles(list: List<ModelProfile>) =
-        prefs.edit().putString("profiles", JSONArray(list.map { it.toJson() }).toString()).apply()
+    private fun profileMetadata() = JSONArray(prefs.getString("profiles", "[]"))
 
-    /** Earlier versions stored one setting per provider; turn any that were filled in into profiles. */
-    private fun migrateLegacyProvider() {
-        if (prefs.contains("profiles")) return
-        val migrated = PROVIDERS.mapNotNull { p ->
-            val key = prefs.getString("p.${p.id}.key", "")!!
-            val model = prefs.getString("p.${p.id}.model", null)
-            if (key.isBlank() && (p.needsKey || model == null)) return@mapNotNull null
-            ModelProfile(
-                name = p.label.substringBefore(" ("), providerId = p.id,
-                baseUrl = prefs.getString("p.${p.id}.base", null) ?: p.defaultBaseUrl, apiKey = key,
-                model = model ?: p.defaultModel, effort = prefs.getString("p.${p.id}.effort", "medium")!!.ifEmpty { "medium" },
-            )
+    /** Called by visible setup/settings. Leave plaintext intact if secure persistence cannot be verified. */
+    fun migrateProviderCredentials(): Boolean = synchronized(CREDENTIALS_LOCK) {
+        if (app.getSystemService(KeyguardManager::class.java)?.isDeviceLocked == true) return@synchronized false
+        runCatching { migrateUnlockedCredentials() }.getOrDefault(false)
+    }
+
+    private fun migrateUnlockedCredentials(): Boolean {
+        val hasProfiles = prefs.contains("profiles")
+        val arr = profileMetadata()
+        val secrets = linkedMapOf<String, String>()
+        val obsoleteKeys = mutableListOf<String>()
+        var rewriteProfiles = false
+        for (i in 0 until arr.length()) {
+            val profile = arr.getJSONObject(i)
+            if (!profile.has("key")) continue
+            profile.optString("key").takeUnless(String::isBlank)?.let { secrets[profileSlot(profile.getString("id"))] = it }
+            profile.remove("key")
+            rewriteProfiles = true
         }
-        val legacyPrimary = prefs.getString("provider", null)
-        prefs.edit()
-            .putString("profiles", JSONArray(migrated.map { it.toJson() }).toString())
-            .putString("primary", migrated.firstOrNull { it.providerId == legacyPrimary }?.id ?: migrated.firstOrNull()?.id)
-            .apply()
+        var oldPrimary: String? = null
+        val oldProvider = if (hasProfiles) null else prefs.getString("provider", null)
+        for (preset in PROVIDERS) {
+            val prefix = "p.${preset.id}"
+            val oldSlot = "$prefix.key"
+            if (prefs.contains(oldSlot)) obsoleteKeys += oldSlot
+            if (hasProfiles) continue // Old duplicates were superseded by saved profiles.
+            val key = prefs.getString(oldSlot, "").orEmpty()
+            val model = prefs.getString("$prefix.model", null)
+            if (key.isBlank() && (preset.needsKey || model == null)) continue
+            val profile = ModelProfile(
+                id = "legacy-${preset.id}", name = preset.label.substringBefore(" ("), providerId = preset.id,
+                baseUrl = prefs.getString("$prefix.base", null) ?: preset.defaultBaseUrl, apiKey = key,
+                model = model ?: preset.defaultModel,
+                effort = prefs.getString("$prefix.effort", null).orEmpty().ifEmpty { "medium" },
+            )
+            if (preset.id == oldProvider || oldPrimary == null) oldPrimary = profile.id
+            arr.put(profile.toJson())
+            if (key.isNotBlank()) secrets[profileSlot(profile.id)] = key
+            rewriteProfiles = true
+        }
+        for (preset in CLOUD_VOICES) {
+            val oldSlot = "tts_${preset.id}_key"
+            if (!prefs.contains(oldSlot)) continue
+            obsoleteKeys += oldSlot
+            prefs.getString(oldSlot, "").orEmpty().takeUnless(String::isBlank)?.let { secrets[voiceSlot(preset.id)] = it }
+        }
+        if (prefs.contains("runtime_key")) {
+            obsoleteKeys += "runtime_key"
+            prefs.getString("runtime_key", "").orEmpty().takeUnless(String::isBlank)?.let { secrets[RUNTIME_SLOT] = it }
+        }
+        if (secrets.isNotEmpty()) {
+            val stage = prefs.edit()
+            secrets.forEach { (slot, value) -> putSecret(stage, slot, value) }
+            if (!stage.commit() || secrets.any { (slot, value) -> secret(slot) != value }) return false
+        }
+        if (!rewriteProfiles && obsoleteKeys.isEmpty()) return true
+        val edit = prefs.edit()
+        if (rewriteProfiles) edit.putString("profiles", arr.toString())
+        if (!hasProfiles && rewriteProfiles) edit.putString("primary", oldPrimary)
+        obsoleteKeys.forEach { edit.remove(it) }
+        return edit.commit()
     }
+
+    private fun secret(slot: String): String =
+        prefs.getString(slot, null)?.let { credentials.decrypt(slot, it) }.orEmpty()
+
+    private fun putSecret(edit: android.content.SharedPreferences.Editor, slot: String, value: String) {
+        if (value.isBlank()) {
+            edit.remove(slot)
+        } else {
+            val sealed = credentials.encrypt(slot, value)
+            check(credentials.decrypt(slot, sealed) == value)
+            edit.putString(slot, sealed)
+        }
+    }
+
+    private fun profileSlot(id: String) = "provider_secret.profile.$id"
+    private fun voiceSlot(id: String) = "provider_secret.voice.$id"
 
     // ---- Voice ----
 
@@ -199,27 +285,43 @@ class Settings(context: Context) {
 
     fun cloudVoice(id: String): CloudVoiceConfig {
         val preset = CLOUD_VOICES.first { it.id == id }
+        val slot = voiceSlot(id)
+        val base = prefs.getString("tts_${id}_url", "").orEmpty().ifEmpty { preset.defaultBaseUrl }
+        val key = if (prefs.contains(slot)) {
+            secret(slot)
+        } else if (id == "openai" && !prefs.contains("tts_${id}_key") && isOfficialOpenAi(base)) {
+            openAiKeyFromModels()
+        } else {
+            ""
+        }
         return CloudVoiceConfig(
             id = id,
-            apiKey = prefs.getString("tts_${id}_key", "")!!.ifEmpty { if (id == "openai") openAiKeyFromModels() else "" },
+            apiKey = key,
             model = prefs.getString("tts_${id}_model", "")!!.ifEmpty { preset.defaultModel },
             voice = prefs.getString("tts_${id}_voice", null) ?: preset.defaultVoice,
-            baseUrl = prefs.getString("tts_${id}_url", "")!!.ifEmpty { preset.defaultBaseUrl },
+            baseUrl = base,
         )
     }
 
-    fun saveCloudVoice(c: CloudVoiceConfig) {
-        prefs.edit()
-            .putString("tts_${c.id}_key", c.apiKey.trim())
-            .putString("tts_${c.id}_model", c.model.trim())
-            .putString("tts_${c.id}_voice", c.voice.trim())
-            .putString("tts_${c.id}_url", c.baseUrl.trim().trimEnd('/'))
-            .apply()
+    fun saveCloudVoice(c: CloudVoiceConfig): Boolean = synchronized(CREDENTIALS_LOCK) {
+        if (!migrateProviderCredentials()) return@synchronized false
+        runCatching {
+            val edit = prefs.edit()
+                .putString("tts_${c.id}_model", c.model.trim())
+                .putString("tts_${c.id}_voice", c.voice.trim())
+                .putString("tts_${c.id}_url", c.baseUrl.trim().trimEnd('/'))
+            putSecret(edit, voiceSlot(c.id), c.apiKey.trim())
+            edit.commit()
+        }.getOrDefault(false)
     }
 
-    /** Re-use the key of an OpenAI model the user already added, so they don't have to paste it twice. */
+    /** Only re-use an official OpenAI credential for the official OpenAI TTS endpoint. */
     private fun openAiKeyFromModels(): String =
-        modelsInOrder().firstOrNull { it.providerId == "openai" && it.apiKey.isNotBlank() }?.apiKey.orEmpty()
+        modelsInOrder().firstOrNull { it.providerId == "openai" && isOfficialOpenAi(it.baseUrl) && it.apiKey.isNotBlank() }
+            ?.apiKey.orEmpty()
+
+    private fun isOfficialOpenAi(url: String): Boolean =
+        runCatching { Endpoints.requireHttpUrl(url) }.getOrNull()?.let { it.isHttps && it.host == "api.openai.com" && it.port == 443 } == true
 
     // ---- Conversation ----
 
@@ -291,8 +393,23 @@ class Settings(context: Context) {
 
     /** Random key the app uses to talk to its own model server; no other app knows it. */
     var runtimeApiKey: String
-        get() = prefs.getString("runtime_key", "") ?: ""
-        set(v) = prefs.edit().putString("runtime_key", v).apply()
+        get() = secret(RUNTIME_SLOT)
+        set(v) = synchronized(CREDENTIALS_LOCK) {
+            val saved = runCatching {
+                if (prefs.contains("runtime_key")) return@runCatching false
+                val edit = prefs.edit()
+                putSecret(edit, RUNTIME_SLOT, v)
+                edit.commit()
+            }.getOrDefault(false)
+            check(saved) { "Secure storage for the on-device model is unavailable." }
+        }
+
+    internal fun getOrCreateRuntimeApiKey(create: () -> String): String = synchronized(CREDENTIALS_LOCK) {
+        runtimeApiKey.ifEmpty {
+            check(!prefs.contains("runtime_key")) { "Open Settings to secure the on-device model credential." }
+            create().also { runtimeApiKey = it }
+        }
+    }
 
     /** Minutes without a request before the model is unloaded to free about 1 GB of memory. 0 = keep it loaded. */
     var runtimeKeepWarmMinutes: Int
@@ -306,10 +423,14 @@ class Settings(context: Context) {
 
     companion object {
         const val DEFAULT_TERMUX_SCRIPT = "/data/data/com.termux/files/home/.jarvis/start-llama.sh"
+        private const val RUNTIME_SLOT = "provider_secret.runtime"
+        private val CREDENTIALS_LOCK = Any()
     }
 }
 
-data class CloudVoiceConfig(val id: String, val apiKey: String, val model: String, val voice: String, val baseUrl: String)
+data class CloudVoiceConfig(val id: String, val apiKey: String, val model: String, val voice: String, val baseUrl: String) {
+    override fun toString() = "CloudVoiceConfig(credentials redacted)"
+}
 
 data class CloudVoicePreset(
     val id: String,

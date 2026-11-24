@@ -8,30 +8,29 @@ import org.junit.Test
 class CleanTranscriptTest {
     private fun c(s: String) = VoiceInput.clean(s)
 
-    @Test fun stripsWakeWordVariants() {
-        assertEquals("Send my wife a message", c("hey jarvis send my wife a message"))
-        assertEquals("Turn on the flashlight", c("Page Arvis turn on the flashlight"))
-        assertEquals("Open YouTube", c("Jarvis, open YouTube"))
-        assertEquals("Call mum", c("okay hey jar vis call mum"))
-        assertEquals("", c("Hey Jervis."))
+    @Test fun stripsDetectedWakePhraseOnly() {
+        assertEquals("Send my wife a message", VoiceInput.clean("hey ash send my wife a message", "Hey Ash"))
+        assertEquals("Turn on the flashlight", VoiceInput.clean("Hello Ash, turn on the flashlight", "Hello Ash"))
+        assertEquals("", VoiceInput.clean("Hey Ash.", "Hey Ash"))
+        assertEquals("", VoiceInput.clean("Hello Ash!", "Hello Ash"))
+        assertEquals("", VoiceInput.clean("Hello asked", "Hello Ash"))
+        assertEquals("", VoiceInput.clean("Hey asked", "Hey Ash"))
+        assertEquals("Pay Ash back", VoiceInput.clean("Pay Ash back", "Hey Ash"))
+        assertEquals("Hey Ash, open YouTube", VoiceInput.clean("Hey Ash, open YouTube", "Hello Ash"))
     }
 
     @Test fun stripsOnlyTheDetectedCustomPhraseAtTheStart() {
         assertEquals("Open maps", VoiceInput.clean("Hello computer, open maps", "Hello Computer"))
-        assertEquals("Open maps", VoiceInput.clean("computer open maps", "Hello Computer"))
+        assertEquals("Computer open maps", VoiceInput.clean("computer open maps", "Hello Computer"))
         assertEquals("Call the computer shop", VoiceInput.clean("Call the computer shop", "Computer"))
         assertEquals("Computer repair", VoiceInput.clean("computer repair"))
     }
 
-    @Test fun stripsOwnPrompt() {
-        assertEquals("Open settings", c("Jarvis yes? open settings"))
-        assertEquals("Open settings", c("yes, open settings"))
-    }
-
     @Test fun leavesRealCommandsAlone() {
-        assertEquals("Text Travis that I'm late", c("text Travis that I'm late"))
+        assertEquals("Text Ash that I'm late", c("text Ash that I'm late"))
         assertEquals("Turn on the flashlight", c("turn on the flashlight"))
         assertEquals("Play the harvest playlist", c("play the harvest playlist"))
+        assertEquals("Yes, open settings", c("yes, open settings"))
     }
 
     private val reply = VoiceInput.words("Done. I sent your wife a message on WhatsApp saying I love you.").toSet()

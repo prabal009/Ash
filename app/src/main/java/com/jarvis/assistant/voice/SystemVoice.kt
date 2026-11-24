@@ -5,24 +5,20 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
+import androidx.annotation.MainThread
 
 /** Android's built-in text-to-speech. Completion callbacks run on the main thread. */
 class SystemVoice(context: Context) : VoiceEngine {
     private val main = Handler(Looper.getMainLooper())
-    private val pending = ConcurrentHashMap<String, () -> Unit>()
+    private var pending: Pair<String, () -> Unit>? = null
+    private var queued: Pair<String, () -> Unit>? = null
+    private var nextId = 0L
     private var initDone = false
     private var ready = false
-    private val queued = mutableListOf<Pair<String, () -> Unit>>()
+    private var closed = false
 
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
-        main.post {
-            initDone = true
-            ready = status == TextToSpeech.SUCCESS
-            queued.forEach { (t, cb) -> if (ready) speak(t, cb) else cb() }
-            queued.clear()
-        }
+        main.post { onInitialized(status) }
     }
 
     init {
@@ -35,30 +31,56 @@ class SystemVoice(context: Context) : VoiceEngine {
         })
     }
 
-    private fun finish(id: String?) {
-        val cb = id?.let { pending.remove(it) } ?: return
-        main.post(cb)
+    private fun onInitialized(status: Int) {
+        if (closed) return
+        initDone = true
+        ready = status == TextToSpeech.SUCCESS
+        if (ready) tts.setAudioAttributes(assistantSpeechAttributes)
+        val next = queued
+        queued = null
+        if (next != null) speak(next.first, next.second)
     }
 
+    private fun finish(id: String?) {
+        if (id != null) main.post { complete(id) }
+    }
+
+    private fun complete(id: String) {
+        val current = pending ?: return
+        if (current.first != id) return
+        pending = null
+        current.second()
+    }
+
+    @MainThread
     override fun speak(text: String, onDone: () -> Unit) {
-        main.post {
-            if (!initDone) { queued += text to onDone; return@post }
-            if (!ready) { onDone(); return@post }
-            val id = UUID.randomUUID().toString()
-            pending[id] = onDone
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+        if (closed) return
+        if (!initDone) {
+            queued = text to onDone
+            return
         }
+        if (!ready) {
+            onDone()
+            return
+        }
+        val id = (++nextId).toString()
+        pending = id to onDone
+        if (tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id) == TextToSpeech.ERROR) complete(id)
     }
 
     /** Stops speaking. Callbacks for the interrupted speech are dropped. */
+    @MainThread
     fun stop() {
-        pending.clear()
-        queued.clear()
+        pending = null
+        queued = null
         tts.stop()
     }
 
+    @MainThread
     override fun shutdown() {
-        tts.stop()
+        if (closed) return
+        closed = true
+        stop()
         tts.shutdown()
     }
 }

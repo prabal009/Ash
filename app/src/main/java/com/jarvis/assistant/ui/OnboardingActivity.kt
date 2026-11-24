@@ -14,7 +14,6 @@ import com.google.android.material.button.MaterialButton
 import com.jarvis.assistant.R
 import com.jarvis.assistant.Settings
 import com.jarvis.assistant.databinding.ActivityOnboardingBinding
-import com.jarvis.assistant.service.JarvisService
 
 /**
  * First-run walkthrough. Asks for what Android lets an app request directly, and takes the user
@@ -188,7 +187,7 @@ class OnboardingActivity : AppCompatActivity() {
 
     private fun finishOnboarding(activate: Boolean) {
         settings.onboarded = true
-        if (activate) JarvisService.start(this)
+        if (activate) Setup.arm(this, explain = false)
         startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK))
         finish()
     }

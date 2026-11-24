@@ -79,10 +79,9 @@
                 android:layout_marginStart="10dp"
                 android:layout_weight="1"
                 android:fontFamily="sans-serif-medium"
-                android:text="Jarvis"
+                android:text="@string/ash_app_name"
                 android:textColor="#FFFFFF"
-                android:textSize="15sp"
-                tools:ignore="HardcodedText" />
+                android:textSize="15sp" />
 
             <TextView
                 android:id="@+id/expState"

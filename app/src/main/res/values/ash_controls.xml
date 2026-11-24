@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ash_app_name" translatable="false">Ash</string>
+    <string name="ash_phone_control">Ash phone control</string>
+    <string name="ash_arm">Enable screen-off listening</string>
+    <string name="ash_arm_explanation">Ash listens on this phone until turned off or stopped by Android. Wake detection stays on your phone and can use extra battery. Turn it off from Ash or the notification.</string>
+    <string name="ash_arm_notifications">Allow Ash notifications to use screen-off listening. You can still tap Talk.</string>
+    <string name="ash_arm_models">Download the wake and speech models in Settings first. You can still tap Talk.</string>
+    <string name="ash_start_refused">Android could not start the microphone. Check microphone access and try again.</string>
+    <string name="ash_notification_active">Voice assistant active</string>
+    <string name="ash_notification_wake">Listening for Hey Ash or Hello Ash</string>
+    <string name="ash_notification_paused">Microphone opening or paused</string>
+    <string name="ash_boot_channel">Listening reminders</string>
+    <string name="ash_boot_reminder">Open Ash to enable screen-off listening again.</string>
+    <string name="ash_default_app">Choose default digital assistant</string>
+    <string name="ash_default_app_active">Ash is the active assistant</string>
+    <string name="ash_default_app_manual">In Android Settings, open Apps → Default apps → Digital assistant to select Ash.</string>
+    <string name="ash_assistant_starting">Ash is preparing to listen</string>
+    <string name="ash_assistant_open">Unlock your phone if needed, then open Ash and tap Talk.</string>
+    <string name="ash_media_access">Optional: choose media-session access</string>
+    <string name="ash_media_access_note">Android grants notification access to allow Ash to find and control supported media players. Ash does not read notification contents.</string>
+    <string name="ash_credentials_unavailable">Secure storage is unavailable. Unlock your phone and try again; the key was not saved.</string>
+    <string name="ash_provider_check_failed">Connection failed. Check the provider URL, credentials and network.</string>
+</resources>

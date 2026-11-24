@@ -27,9 +27,10 @@ class AiRouter(
     private fun builtin(): ModelProfile? {
         val rt = runtime ?: return null
         if (!settings.embeddedRuntimeEnabled || !rt.isSupported()) return null
+        val apiKey = runCatching { rt.apiKey() }.getOrNull() ?: return null
         return ModelProfile(
             id = RuntimeConfig.BUILTIN_PROFILE_ID, name = "On-device Qwen", providerId = "custom",
-            baseUrl = rt.baseUrl(), apiKey = rt.apiKey(), model = RuntimeConfig.MODEL_NAME, effort = "",
+            baseUrl = rt.baseUrl(), apiKey = apiKey, model = RuntimeConfig.MODEL_NAME, effort = "",
         )
     }
 

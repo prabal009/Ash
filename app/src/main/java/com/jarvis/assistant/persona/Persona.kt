@@ -5,7 +5,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
-/** Jarvis's voice: how it greets and what short acknowledgements it uses. Pure logic. */
+/** Ash's voice: how it greets and what short acknowledgements it uses. Pure logic. */
 object Persona {
     enum class Daypart(val word: String) { MORNING("morning"), AFTERNOON("afternoon"), EVENING("evening") }
 
@@ -16,13 +16,16 @@ object Persona {
     }
 
     /** First wake of the day, when nothing has been asked yet. */
-    fun greeting(hour: Int): String = "Hello sir, good ${daypart(hour).word}. What's the task for today?"
+    fun greeting(hour: Int): String = greeting(daypart(hour))
+
+    private fun greeting(part: Daypart): String =
+        "Good ${part.word}. I'm Ash. What can I help you with?"
 
     /** First wake of the day, when a command came with it: the greeting is folded into the reply. */
-    fun greetingPrefix(hour: Int): String = "Good ${daypart(hour).word}, sir."
+    fun greetingPrefix(hour: Int): String = "Good ${daypart(hour).word}."
 
     /** All three greetings, so the voice can pre-render them and speak them with no delay. */
-    val ALL_GREETINGS: List<String> = Daypart.entries.map { "Hello sir, good ${it.word}. What's the task for today?" }
+    val ALL_GREETINGS: List<String> = Daypart.entries.map(::greeting)
 
     /** Short acknowledgements for slow requests. Never used for instant commands. */
     val ACKNOWLEDGEMENTS = listOf("One moment.", "Let me check.", "Working on it.", "Give me a second.")

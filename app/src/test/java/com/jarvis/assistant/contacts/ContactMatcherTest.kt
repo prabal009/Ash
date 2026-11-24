@@ -66,11 +66,26 @@ class ContactMatcherTest {
         assertNull(ContactMatcher.pick("somebody else", two))
     }
 
-    @Test fun numberChoice() {
-        assertEquals("98100 00001", ContactMatcher.bestNumber(rahulS)?.number)
-        assertEquals("98100 00003", ContactMatcher.bestNumber(mummy)?.number)
-        assertEquals("work", ContactMatcher.bestNumber(drGupta)?.type)
-        assertNull(ContactMatcher.bestNumber(c(9, "Nobody")))
-        assertEquals("Rahul Sharma, mobile", ContactMatcher.describe(rahulS, rahulS.numbers[0]))
+    @Test fun numberValidationSelectionAndConfirmation() {
+        assertEquals("9810000001", ContactMatcher.dialableNumber("98100 00001"))
+        assertEquals("+919810000001", ContactMatcher.dialableNumber("+91 (98100)-00001"))
+        assertNull(ContactMatcher.dialableNumber("*#06#"))
+        assertNull(ContactMatcher.dialableNumber("98100;123"))
+        assertNull(ContactMatcher.dialableNumber("12"))
+
+        val dupes = ContactMatcher.distinctNumbers(
+            listOf(PhoneNumber("98100 00001", "mobile"), PhoneNumber("98100-00001", "work"), PhoneNumber("011 2345", "home"))
+        )
+        assertEquals(2, dupes.size)
+        assertEquals(rahulS.numbers[1], ContactMatcher.pickNumber("home", rahulS.numbers))
+        assertEquals(rahulS.numbers[0], ContactMatcher.pickNumber("first", rahulS.numbers))
+        assertEquals(rahulS.numbers[1], ContactMatcher.pickNumber("the home number", rahulS.numbers))
+        assertNull(ContactMatcher.pickNumber("work", rahulS.numbers))
+
+        assertTrue(ContactMatcher.confirmsDial("yes"))
+        assertTrue(ContactMatcher.confirmsDial("open the dialer"))
+        assertTrue(ContactMatcher.confirmsDial("haan"))
+        org.junit.Assert.assertFalse(ContactMatcher.confirmsDial("no"))
+        org.junit.Assert.assertFalse(ContactMatcher.confirmsDial("yes call someone else"))
     }
 }

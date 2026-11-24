@@ -32,6 +32,8 @@ class SettingsFragment : Fragment() {
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, state: Bundle?): View {
         _ui = FragmentSettingsBinding.inflate(inflater, container, false)
         settings = Settings(requireContext())
+        settings.migrateProviderCredentials()
+        ui.cloudKey.isSaveEnabled = false
         val activity = requireActivity()
 
         // Voice
@@ -40,7 +42,7 @@ class SettingsFragment : Fragment() {
         CLOUD_VOICES.forEach { ui.engineChips.addChoice(it.name, it.id) }
         ui.engineChips.select(settings.voiceEngine)
         ui.engineChips.setOnCheckedStateChangeListener { _, _ ->
-            saveCloudFields()
+            if (!saveCloudFields()) return@setOnCheckedStateChangeListener
             settings.voiceEngine = ui.engineChips.selectedTag ?: "kokoro"
             showVoiceSection()
         }
@@ -68,7 +70,11 @@ class SettingsFragment : Fragment() {
         ui.customWake.setOnClickListener { editWakePhrase() }
         ui.wakeSwitch.isChecked = settings.wakeWordEnabled
         ui.bootSwitch.isChecked = settings.startOnBoot
-        ui.wakeSwitch.setOnCheckedChangeListener { _, v -> settings.wakeWordEnabled = v }
+        ui.wakeSwitch.setOnCheckedChangeListener { _, enabled ->
+            settings.wakeWordEnabled = enabled
+            if (!enabled) JarvisService.start(activity, JarvisService.ACTION_WAKE_SETTINGS)
+            else if (!JarvisService.running) Setup.arm(activity, explain = true)
+        }
         ui.bootSwitch.setOnCheckedChangeListener { _, v -> settings.startOnBoot = v }
         ui.bargeSwitch.isChecked = settings.interruptByTalking
         ui.bargeSwitch.setOnCheckedChangeListener { _, v -> settings.interruptByTalking = v }
@@ -78,6 +84,16 @@ class SettingsFragment : Fragment() {
 
         // Permissions
         refreshers += Setup.bindRows(activity, ui.permissionRows, listOf(Setup.Item.MICROPHONE, Setup.Item.PHONE_CONTROL, Setup.Item.BACKGROUND))
+        ui.mediaAccess.setOnClickListener {
+            AlertDialog.Builder(activity)
+                .setTitle(R.string.ash_media_access)
+                .setMessage(R.string.ash_media_access_note)
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.open_settings) { _, _ ->
+                    runCatching { startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                        .onFailure { Toast.makeText(activity, R.string.ash_media_access, Toast.LENGTH_SHORT).show() }
+                }.show()
+        }
 
         // About you
         ui.notes.setText(settings.personalNotes)
@@ -110,14 +126,14 @@ class SettingsFragment : Fragment() {
             .setView(field).setPositiveButton(R.string.save, null).setNegativeButton(R.string.cancel, null).show()
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val phrase = WakePhrase.normalize(field.text.toString())
-            if (phrase.isNotEmpty() && !WakePhrase.isValid(phrase)) {
+            if (phrase.isNotEmpty() && (!WakePhrase.isValid(phrase) || phrase.equals("Ash", true))) {
                 field.error = getString(R.string.wake_phrase_invalid)
                 return@setOnClickListener
             }
-            settings.customWakePhrase = phrase.takeUnless { it.equals(WakePhrase.DEFAULT, true) || it.equals("Jarvis", true) }.orEmpty()
+            settings.customWakePhrase = WakePhrase.optional(phrase)
             ui.customWake.text = getString(R.string.wake_phrase_value, settings.wakePromptPhrase)
             if (JarvisService.running) {
-                requireContext().startService(Intent(requireContext(), JarvisService::class.java).setAction(JarvisService.ACTION_WAKE_SETTINGS))
+                JarvisService.start(requireContext(), JarvisService.ACTION_WAKE_SETTINGS)
             }
             dialog.dismiss()
         }
@@ -143,7 +159,7 @@ class SettingsFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
-        preview?.stop()
+        preview?.shutdown()
         preview = null
         refreshers.clear()
         _ui = null
@@ -171,23 +187,25 @@ class SettingsFragment : Fragment() {
         ui.cloudUrlLayout.visibility = if (preset.editableUrl) View.VISIBLE else View.GONE
     }
 
-    private fun saveCloudFields() {
-        val id = shownCloud ?: return
-        val ui = _ui ?: return
+    private fun saveCloudFields(): Boolean {
+        val id = shownCloud ?: return true
+        val ui = _ui ?: return true
         val preset = CLOUD_VOICES.first { it.id == id }
-        settings.saveCloudVoice(CloudVoiceConfig(
+        val saved = settings.saveCloudVoice(CloudVoiceConfig(
             id = id,
             apiKey = ui.cloudKey.text.toString(),
             model = ui.cloudModel.text.toString().ifBlank { preset.defaultModel },
             voice = ui.cloudVoice.text.toString(),
             baseUrl = if (preset.editableUrl) ui.cloudUrl.text.toString().ifBlank { preset.defaultBaseUrl } else preset.defaultBaseUrl,
         ))
+        ui.cloudKeyLayout.error = if (saved) null else getString(R.string.ash_credentials_unavailable)
+        return saved
     }
 
     private fun speedText(v: Float) = getString(R.string.voice_speed, v)
 
     private fun previewVoice() {
-        saveCloudFields()
+        if (!saveCloudFields()) return
         val cloud = CLOUD_VOICES.firstOrNull { it.id == settings.voiceEngine }
         if (cloud != null && cloud.needsKey && settings.cloudVoice(cloud.id).apiKey.isBlank()) {
             Toast.makeText(requireContext(), getString(R.string.add_key_first, cloud.name), Toast.LENGTH_SHORT).show()
@@ -198,11 +216,14 @@ class SettingsFragment : Fragment() {
         }
         val voice = when {
             cloud != null -> "${cloud.name}"
-            else -> KOKORO_VOICES.firstOrNull { it.sid == settings.kokoroSpeaker }?.name ?: "Jarvis"
+            else -> KOKORO_VOICES.firstOrNull { it.sid == settings.kokoroSpeaker }?.name ?: getString(R.string.ash_app_name)
         }
         ui.previewButton.isEnabled = false
         ui.previewButton.text = getString(R.string.speaking_ellipsis)
         val speaker = preview ?: Speaker(requireContext()).also { preview = it }
+        speaker.onFocusLost = {
+            _ui?.previewButton?.apply { isEnabled = true; setText(R.string.preview_voice) }
+        }
         speaker.speak("Good evening. This is the $voice voice. All systems are online and ready when you are.") {
             _ui?.let {
                 it.previewButton.isEnabled = true

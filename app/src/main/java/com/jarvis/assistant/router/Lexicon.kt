@@ -11,8 +11,13 @@ object Lexicon {
     private val AM_PM = Regex("""\b([ap])\.\s?m\b\.?""")
     private val PUNCTUATION = Regex("""[^\p{L}\p{M}\p{N}:+\s]""")
     private val LEADING_PHRASES = listOf("can you", "could you", "would you", "will you", "can u")
+    private val ADDRESS = Regex(
+        """^(?:(?:hey|hello|hi|ok|okay)\s+(?:ash|jarvis)(?:[,.!?]\s*|\s+)|(?:ash|jarvis)[,:]\s*|jarvis\.?\s+)""",
+        RegexOption.IGNORE_CASE,
+    )
     private val LEADING = setOf("hey", "hi", "ok", "okay", "jarvis", "please", "plz", "pls", "kindly", "zara", "jara", "mujhe")
     private val TRAILING = setOf("please", "plz", "pls", "na", "yaar", "jaldi", "now", "abhi")
+    private val ORDINAL = Regex("""(?:the )?(?:option |number )?(first|second|third|fourth|fifth|[1-5]|one|two|three|four|five|pehla|pehle|doosra|dusra|teesra)(?: one)?""")
 
     /** Devanagari spellings are matched without nukta, so keys and input go through [devKey]. */
     private fun devKey(s: String) = Normalizer.normalize(s, Normalizer.Form.NFD).replace("\u093C", "")
@@ -40,7 +45,7 @@ object Lexicon {
         "म्यूजिक" to "music", "म्यूज़िक" to "music", "गाना" to "gaana", "गाने" to "gaana", "अगला" to "agla", "पिछला" to "pichla",
         "टाइमर" to "timer", "अलार्म" to "alarm", "मिनट" to "minute", "घंटा" to "ghanta", "घंटे" to "ghante", "सेकंड" to "second",
         "सुबह" to "subah", "शाम" to "shaam", "रात" to "raat", "दोपहर" to "dopahar", "टाइम" to "time", "बैटरी" to "battery",
-        "वाईफाई" to "wifi", "वाईफ़ाई" to "wifi", "वाई-फाई" to "wifi", "ब्लूटूथ" to "bluetooth", "जार्विस" to "jarvis", "जारविस" to "jarvis",
+        "वाईफाई" to "wifi", "वाईफ़ाई" to "wifi", "वाई-फाई" to "wifi", "ब्लूटूथ" to "bluetooth", "जार्विस" to "jarvis", "जारविस" to "jarvis", "ऐश" to "ash",
         // apps
         "यूट्यूब" to "youtube", "व्हाट्सएप" to "whatsapp", "व्हाट्सऐप" to "whatsapp", "वाट्सएप" to "whatsapp", "वॉट्सएप" to "whatsapp",
         "व्हाट्सअप" to "whatsapp", "इंस्टाग्राम" to "instagram", "फेसबुक" to "facebook", "क्रोम" to "chrome", "कैमरा" to "camera",
@@ -50,6 +55,19 @@ object Lexicon {
         "स्टोर" to "store", "नेटफ्लिक्स" to "netflix", "अमेज़न" to "amazon", "अमेजन" to "amazon", "पेटीएम" to "paytm", "फोनपे" to "phonepe",
         "ट्विटर" to "twitter", "स्नैपचैट" to "snapchat", "घड़ी" to "clock", "घडी" to "clock",
     ).mapKeys { devKey(it.key) }
+
+    /** Optional spoken address at the command boundary; never removes the name from the payload. */
+    internal fun stripCommandAddress(raw: String): String = ADDRESS.replaceFirst(raw.trim(), "")
+
+    internal fun optionIndex(answer: String?): Int? =
+        when (ORDINAL.matchEntire(normalize(answer.orEmpty()))?.groupValues?.get(1)) {
+            "first", "1", "one", "pehla", "pehle" -> 0
+            "second", "2", "two", "doosra", "dusra" -> 1
+            "third", "3", "three", "teesra" -> 2
+            "fourth", "4", "four" -> 3
+            "fifth", "5", "five" -> 4
+            else -> null
+        }
 
     /** Lower-case, no punctuation, Devanagari words and digits turned into Roman, single spaces. */
     fun normalize(raw: String): String {

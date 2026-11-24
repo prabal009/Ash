@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ash_phone_control">Ash फ़ोन नियंत्रण</string>
+    <string name="ash_arm">स्क्रीन बंद होने पर सुनना चालू करें</string>
+    <string name="ash_arm_explanation">Ash तब तक सुनता है जब तक आप या Android इसे बंद न करें। जगाने वाले वाक्यों की पहचान इसी फ़ोन पर होती है और इससे बैटरी की खपत बढ़ सकती है। Ash या सूचना से इसे बंद करें।</string>
+    <string name="ash_arm_notifications">स्क्रीन बंद होने पर सुनने के लिए Ash की सूचनाओं की अनुमति दें। आप अब भी बोलें पर टैप कर सकते हैं।</string>
+    <string name="ash_arm_models">पहले सेटिंग में जगाने और आवाज़ पहचानने के मॉडल डाउनलोड करें। आप अब भी बोलें पर टैप कर सकते हैं।</string>
+    <string name="ash_start_refused">Android माइक्रोफ़ोन चालू नहीं कर पाया। माइक्रोफ़ोन की अनुमति जाँचकर फिर कोशिश करें।</string>
+    <string name="ash_notification_active">आवाज़ सहायक चालू है</string>
+    <string name="ash_notification_wake">Hey Ash या Hello Ash सुन रहा है</string>
+    <string name="ash_notification_paused">माइक्रोफ़ोन चालू हो रहा है या रुका है</string>
+    <string name="ash_boot_channel">सुनने के रिमाइंडर</string>
+    <string name="ash_boot_reminder">स्क्रीन बंद होने पर फिर से सुनना चालू करने के लिए Ash खोलें।</string>
+    <string name="ash_default_app">डिफ़ॉल्ट डिजिटल सहायक चुनें</string>
+    <string name="ash_default_app_active">Ash सक्रिय सहायक है</string>
+    <string name="ash_default_app_manual">Android सेटिंग में ऐप्स → डिफ़ॉल्ट ऐप्स → डिजिटल सहायक खोलकर Ash चुनें।</string>
+    <string name="ash_assistant_starting">Ash सुनने के लिए तैयार हो रहा है</string>
+    <string name="ash_assistant_open">ज़रूरत हो तो फ़ोन अनलॉक करें, फिर Ash खोलकर बोलें पर टैप करें।</string>
+    <string name="ash_media_access">वैकल्पिक: मीडिया सेशन की अनुमति चुनें</string>
+    <string name="ash_media_access_note">समर्थित मीडिया प्लेयर ढूँढने और नियंत्रित करने के लिए Android, Ash को सूचनाओं की अनुमति देता है। Ash सूचनाओं की सामग्री नहीं पढ़ता।</string>
+    <string name="ash_credentials_unavailable">सुरक्षित स्टोरेज उपलब्ध नहीं है। फ़ोन अनलॉक करके फिर कोशिश करें; कुंजी सहेजी नहीं गई।</string>
+    <string name="ash_provider_check_failed">कनेक्शन नहीं हुआ। प्रदाता का URL, कुंजी और नेटवर्क जाँचें।</string>
+</resources>

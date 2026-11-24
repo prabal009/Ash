@@ -5,6 +5,7 @@ import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import com.jarvis.assistant.CloudVoiceConfig
 import com.jarvis.assistant.Settings
+import com.jarvis.assistant.ai.TestAndroidKeyStore
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
@@ -16,6 +17,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -26,8 +28,9 @@ import java.util.concurrent.TimeUnit
 
 /** The cloud voices against a fake server: request format per provider, streaming, and errors. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], shadows = [FloatAudioTrackShadow::class])
 class CloudVoiceTest {
+    @get:Rule internal val keyStore = TestAndroidKeyStore()
     private val ctx: Context = ApplicationProvider.getApplicationContext()
     private val server = MockWebServer()
 
@@ -124,7 +127,8 @@ class CloudVoiceTest {
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"Incorrect API key provided"}}"""))
         val (done, failed) = speak(CloudVoiceConfig("openai", "wrong", "gpt-4o-mini-tts", "onyx", url()))
         assertFalse(done)
-        assertTrue(failed!!, "check the API key" in failed && "Incorrect API key" in failed)
+        assertTrue(failed!!, "check the API key" in failed)
+        assertFalse("raw provider response must not be echoed", "Incorrect API key" in failed)
     }
 
     @Test

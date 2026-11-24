@@ -9,19 +9,24 @@ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.security.MessageDigest
 
 /** Downloads and unpacks the on-device voice models. */
 object ModelDownloader {
+    private val client = OkHttpClient.Builder().followSslRedirects(false).build()
+    private const val WAKE_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+    private const val SPEECH_SHA256 = "c8676e5ff9ac2a85296e53ee0fd4d5fb1db6770e7a7647166eeafe349ade6834"
+    private const val KOKORO_SHA256 = "c9f0dd393615805b0bab050c340834d5e684e732aec91c0e860cd30e982c08bd"
 
     /** The "Hey Jarvis" keyword model: a 17 MB download, of which only ~5 MB of int8 files are kept. */
     fun downloadWakeWord(context: Context, progress: (Int) -> Unit) {
-        download(context, WakeModel.URL, WakeModel.dir(context), progress, ::openTarBz2)
+        download(context, WakeModel.URL, WakeModel.dir(context), WAKE_SHA256, progress, ::openTarBz2)
         prune(WakeModel.dir(context), WakeModel.KEEP_FILES)
     }
 
     /** Offline speech recognition for commands (57 MB download). */
     fun downloadSpeech(context: Context, progress: (Int) -> Unit) {
-        download(context, SpeechModel.URL, SpeechModel.dir(context), progress, ::openTarBz2)
+        download(context, SpeechModel.URL, SpeechModel.dir(context), SPEECH_SHA256, progress, ::openTarBz2)
         prune(SpeechModel.dir(context), SpeechModel.KEEP_FILES)
     }
 
@@ -31,38 +36,43 @@ object ModelDownloader {
 
     /** The ~100 MB Kokoro voice. */
     fun downloadKokoro(context: Context, progress: (Int) -> Unit) =
-        download(context, Kokoro.MODEL_URL, Kokoro.modelDir(context), progress, ::openTarBz2)
+        download(context, Kokoro.MODEL_URL, Kokoro.modelDir(context), KOKORO_SHA256, progress, ::openTarBz2)
 
     private fun download(
         context: Context,
         url: String,
         target: File,
+        expectedSha256: String,
         progress: (Int) -> Unit,
         open: (InputStream) -> ArchiveInputStream<*>,
     ) {
-        val tmp = File(context.cacheDir, target.name + ".download")
-        OkHttpClient().newCall(Request.Builder().url(url).build()).execute().use { resp ->
-            if (!resp.isSuccessful) throw IOException("Download failed: HTTP ${resp.code}")
-            val body = resp.body ?: throw IOException("Empty download")
-            val total = body.contentLength()
-            body.byteStream().use { input ->
-                tmp.outputStream().use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    var done = 0L
-                    var last = -1
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        done += n
-                        // The last 10% of the bar covers unpacking.
-                        val pct = if (total > 0) (done * 90 / total).toInt() else 0
-                        if (pct != last) { last = pct; progress(pct) }
+        val tmp = File.createTempFile("${target.name}-", ".download", context.cacheDir)
+        val digest = MessageDigest.getInstance("SHA-256")
+        try {
+            client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                if (!resp.isSuccessful) throw IOException("Download failed: HTTP ${resp.code}")
+                val body = resp.body ?: throw IOException("Empty download")
+                val total = body.contentLength()
+                body.byteStream().use { input ->
+                    tmp.outputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        var done = 0L
+                        var last = -1
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            digest.update(buf, 0, n)
+                            done += n
+                            val pct = if (total > 0) (done * 90 / total).toInt() else 0
+                            if (pct != last) { last = pct; progress(pct) }
+                        }
                     }
                 }
             }
-        }
-        try {
+            if (digest.digest().joinToString("") { "%02x".format(it) } != expectedSha256) {
+                throw IOException("Model download did not match the expected SHA-256")
+            }
             unpack(tmp, target, open)
         } finally {
             tmp.delete()

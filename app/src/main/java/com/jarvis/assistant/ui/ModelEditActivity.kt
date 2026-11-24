@@ -28,7 +28,9 @@ class ModelEditActivity : AppCompatActivity() {
         setContentView(ui.root)
         ui.root.padForSystemBars()
         settings = Settings(this)
+        settings.migrateProviderCredentials()
         existing = intent.getStringExtra(EXTRA_ID)?.let { id -> settings.profiles().firstOrNull { it.id == id } }
+        ui.apiKey.isSaveEnabled = false
 
         ui.pageTitle.text = getString(if (existing == null) R.string.add_model else R.string.edit_model)
         ui.delete.visibility = if (existing == null) View.GONE else View.VISIBLE
@@ -111,15 +113,16 @@ class ModelEditActivity : AppCompatActivity() {
         Thread {
             val result = runCatching { Llm.test(profile.toConfig()) }
             runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
                 ui.testButton.isEnabled = true
                 ui.testButton.setText(R.string.test_connection)
                 ui.testResult.visibility = View.VISIBLE
                 result.onSuccess {
                     ui.testResult.setTextColor(color(R.color.ok))
-                    ui.testResult.text = getString(R.string.test_ok, profile.name, it.take(60))
+                    ui.testResult.text = getString(R.string.test_ok, profile.name, "OK")
                 }.onFailure {
                     ui.testResult.setTextColor(color(R.color.danger))
-                    ui.testResult.text = "✗ ${it.message?.take(300) ?: it.javaClass.simpleName}"
+                    ui.testResult.setText(R.string.ash_provider_check_failed)
                 }
             }
         }.start()
@@ -127,7 +130,10 @@ class ModelEditActivity : AppCompatActivity() {
 
     private fun save() {
         val profile = current() ?: return
-        settings.saveProfile(profile)
+        if (!settings.saveProfile(profile)) {
+            ui.apiKeyLayout.error = getString(R.string.ash_credentials_unavailable)
+            return
+        }
         if (ui.primarySwitch.isChecked) settings.primaryId = profile.id
         finish()
     }
@@ -139,8 +145,8 @@ class ModelEditActivity : AppCompatActivity() {
             .setMessage(R.string.delete_model_message)
             .setNegativeButton(R.string.cancel, null)
             .setPositiveButton(R.string.delete) { _, _ ->
-                settings.deleteProfile(profile.id)
-                finish()
+                if (settings.deleteProfile(profile.id)) finish()
+                else ui.apiKeyLayout.error = getString(R.string.ash_credentials_unavailable)
             }
             .show()
     }

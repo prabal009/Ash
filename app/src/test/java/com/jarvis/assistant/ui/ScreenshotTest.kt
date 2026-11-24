@@ -15,7 +15,9 @@ import androidx.test.core.app.ApplicationProvider
 import com.jarvis.assistant.ModelProfile
 import com.jarvis.assistant.R
 import com.jarvis.assistant.Settings
+import com.jarvis.assistant.ai.TestAndroidKeyStore
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -29,6 +31,7 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34], qualifiers = "w411dp-h891dp-xxhdpi")
 class ScreenshotTest {
+    @get:Rule internal val keyStore = TestAndroidKeyStore()
     private val out = File("build/screenshots").apply { mkdirs() }
     private val ctx: Context = ApplicationProvider.getApplicationContext()
 

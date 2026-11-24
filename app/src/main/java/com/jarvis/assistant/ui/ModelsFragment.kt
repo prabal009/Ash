@@ -20,6 +20,7 @@ class ModelsFragment : Fragment() {
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, state: Bundle?): View {
         _ui = FragmentModelsBinding.inflate(inflater, container, false)
         settings = Settings(requireContext())
+        settings.migrateProviderCredentials()
         ui.addButton.setOnClickListener { startActivity(Intent(requireContext(), ModelEditActivity::class.java)) }
         ui.fallbackSwitch.isChecked = settings.fallbackEnabled
         ui.fallbackSwitch.setOnCheckedChangeListener { _, v -> settings.fallbackEnabled = v }

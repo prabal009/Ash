@@ -1,8 +1,9 @@
 package com.jarvis.assistant.ai
 
-import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
+import com.jarvis.assistant.ai.Endpoints.configureLocalTransport
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
 /** What a quick `GET /health` says about a local model server. No Android classes, so it is unit-tested. */
 object ServerHealth {
@@ -10,24 +11,28 @@ object ServerHealth {
 
     /** llama-server answers 200 when ready and 503 while the model loads. Servers without /health (404) are alive. */
     fun check(origin: String, timeoutMs: Int = 700): State {
-        var conn: HttpURLConnection? = null
         return try {
-            val c = URL("$origin/health").openConnection() as HttpURLConnection
-            conn = c
-            c.connectTimeout = timeoutMs
-            c.readTimeout = timeoutMs
-            c.useCaches = false
-            when (c.responseCode) {
-                in 200..299, 404, 405 -> State.OK
-                503 -> State.LOADING
-                else -> State.DOWN
+            val base = Endpoints.requireHttpUrl(origin)
+            val client = if (Endpoints.isLocal(base)) LOCAL_HTTP else HTTP
+            val request = Request.Builder().url(base.newBuilder().addPathSegment("health").build()).build()
+            val call = client.newCall(request)
+            call.timeout().timeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            call.execute().use { response ->
+                when (response.code) {
+                    in 200..299, 404, 405 -> State.OK
+                    503 -> State.LOADING
+                    else -> State.DOWN
+                }
             }
-        } catch (_: IOException) {
+        } catch (_: Exception) {
             State.DOWN
-        } catch (_: RuntimeException) {
-            State.DOWN
-        } finally {
-            conn?.disconnect()
         }
     }
+
+    private val HTTP = OkHttpClient.Builder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .retryOnConnectionFailure(false)
+        .build()
+    private val LOCAL_HTTP = HTTP.newBuilder().configureLocalTransport().build()
 }

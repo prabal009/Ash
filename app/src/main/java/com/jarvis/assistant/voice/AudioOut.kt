@@ -1,10 +1,11 @@
 package com.jarvis.assistant.voice
 
-import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Build
 import android.os.SystemClock
+import com.jarvis.assistant.audio.AudioRouteController
+import com.jarvis.assistant.audio.BuiltInPhoneAudioRouteController
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.sqrt
@@ -22,6 +23,8 @@ object AudioOut {
 
     private val generation = AtomicInteger()
     @Volatile private var track: AudioTrack? = null
+    /** Optional Phase 4 hook for preferred playback device routing. */
+    @Volatile var routeController: AudioRouteController = BuiltInPhoneAudioRouteController
 
     /** Diagnostics: samples sent to the speaker for the most recent utterance. */
     @Volatile var lastSamplesPlayed = 0L
@@ -32,10 +35,11 @@ object AudioOut {
     private val envelopes = CopyOnWriteArrayList<Envelope>()
 
     /** Stops anything playing and returns a ticket for the next utterance. */
+    @Synchronized
     fun interrupt(): Int {
         val gen = generation.incrementAndGet()
         envelopes.clear()
-        track?.let { runCatching { it.pause(); it.flush() } } // also interrupts a blocking write
+        track?.let { runCatching { it.pause(); it.flush() } }
         return gen
     }
 
@@ -54,7 +58,9 @@ object AudioOut {
     }
 
     /** Frees the speaker; it's recreated on the next utterance. */
+    @Synchronized
     fun release() {
+        interrupt()
         track?.release()
         track = null
     }
@@ -63,18 +69,35 @@ object AudioOut {
     class Playback(private val ticket: Int) {
         private var endAt = 0L
         private var started = false
-        private val out = audioTrack()
+        private lateinit var out: AudioTrack
 
-        init { if (isCurrent(ticket)) lastSamplesPlayed = 0 }
+        init {
+            synchronized(AudioOut) { if (isCurrent(ticket)) lastSamplesPlayed = 0 }
+        }
 
         /** Plays [samples] (24 kHz mono floats). Returns false once this speech has been interrupted. */
         fun write(samples: FloatArray): Boolean {
             if (!isCurrent(ticket)) return false
             if (samples.isEmpty()) return true
-            if (!started) { out.play(); started = true }
-            recordEnvelope(maxOf(endAt, SystemClock.elapsedRealtime()), samples)
-            out.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
-            lastSamplesPlayed += samples.size
+            recordEnvelope(ticket, maxOf(endAt, SystemClock.elapsedRealtime()), samples)
+            var offset = 0
+            while (offset < samples.size) {
+                val written = synchronized(AudioOut) {
+                    if (!isCurrent(ticket)) return false
+                    if (!started) {
+                        out = audioTrack()
+                        out.play()
+                        started = true
+                    }
+                    // Hold the same lock as interrupt, but never block on space in the track.
+                    val result = out.write(samples, offset, samples.size - offset, AudioTrack.WRITE_NON_BLOCKING)
+                    check(result >= 0) { "AudioTrack write failed ($result)" }
+                    lastSamplesPlayed += result
+                    result
+                }
+                offset += written
+                if (offset < samples.size) Thread.sleep(10)
+            }
             // Track the end time on the wall clock rather than the playback head, which is
             // unreliable across pause/flush and for clips shorter than the start threshold.
             val now = SystemClock.elapsedRealtime()
@@ -95,7 +118,9 @@ object AudioOut {
         fun finish() {
             if (!started) return
             while (isCurrent(ticket) && SystemClock.elapsedRealtime() < endAt + 120) Thread.sleep(20)
-            if (isCurrent(ticket)) out.stop() // also plays out anything still buffered
+            synchronized(AudioOut) {
+                if (isCurrent(ticket)) out.stop() // also plays out anything still buffered
+            }
         }
     }
 
@@ -112,7 +137,7 @@ object AudioOut {
         }
     }
 
-    private fun recordEnvelope(startMs: Long, samples: FloatArray) {
+    private fun recordEnvelope(ticket: Int, startMs: Long, samples: FloatArray) {
         val step = SAMPLE_RATE / 50 // 20 ms
         val levels = FloatArray((samples.size + step - 1) / step) { i ->
             var sum = 0f
@@ -120,22 +145,19 @@ object AudioOut {
             for (j in i * step until end) sum += samples[j] * samples[j]
             (sqrt(sum / (end - i * step)) * 6f).coerceAtMost(1f)
         }
-        val now = SystemClock.elapsedRealtime()
-        envelopes.removeAll { it.startMs + it.levels.size * 20L < now - 1000 }
-        envelopes += Envelope(startMs, levels)
+        synchronized(this) {
+            if (!isCurrent(ticket)) return
+            val now = SystemClock.elapsedRealtime()
+            envelopes.removeAll { it.startMs + it.levels.size * 20L < now - 1000 }
+            envelopes += Envelope(startMs, levels)
+        }
     }
 
-    @Synchronized
     private fun audioTrack(): AudioTrack {
         track?.let { return it }
         val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
         val t = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
+            .setAudioAttributes(assistantSpeechAttributes)
             .setAudioFormat(
                 AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
@@ -148,6 +170,7 @@ object AudioOut {
             .build()
         // Start playing as soon as there is any audio, so short clips like "Yes?" aren't held back.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) runCatching { t.setStartThresholdInFrames(256) }
+        routeController.prepareOutput().preferredDevice?.let { runCatching { t.setPreferredDevice(it) } }
         track = t
         return t
     }

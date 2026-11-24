@@ -1,14 +1,14 @@
 package com.jarvis.assistant.agent
 
 import android.util.Base64
-import com.anthropic.client.AnthropicClient
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
 import com.anthropic.core.JsonValue
+import com.anthropic.core.jsonMapper
 import com.anthropic.models.messages.Base64ImageSource
 import com.anthropic.models.messages.CacheControlEphemeral
 import com.anthropic.models.messages.ContentBlockParam
 import com.anthropic.models.messages.ImageBlockParam
 import com.anthropic.models.messages.MessageCreateParams
+import com.anthropic.models.messages.Message
 import com.anthropic.models.messages.MessageParam
 import com.anthropic.models.messages.OutputConfig
 import com.anthropic.models.messages.StopReason
@@ -16,20 +16,22 @@ import com.anthropic.models.messages.TextBlockParam
 import com.anthropic.models.messages.Tool
 import com.anthropic.models.messages.ToolResultBlockParam
 import com.jarvis.assistant.ProviderConfig
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import kotlin.jvm.optionals.getOrNull
 
-/** Claude via the official Anthropic Java SDK. History is append-only so thinking blocks replay intact. */
+/** Claude Messages API with SDK wire models so native thinking blocks replay intact. */
 class AnthropicSession(
     private val config: ProviderConfig,
     private val system: String,
     toolSpecs: List<ToolSpec>,
 ) : ChatSession {
 
-    private val client: AnthropicClient = AnthropicOkHttpClient.builder()
-        .apiKey(config.apiKey)
-        .apply { if (config.baseUrl.isNotBlank()) baseUrl(config.baseUrl.trimEnd('/')) }
-        .build()
+    private val wire = ProviderRequest(config.baseUrl.ifBlank { config.preset.defaultBaseUrl }, toolSpecs.isNotEmpty())
+
+    override fun cancel() = wire.cancel()
 
     private val tools: List<Tool> = toolSpecs.map { spec ->
         val props = spec.parameters.optJSONObject("properties") ?: JSONObject()
@@ -66,7 +68,8 @@ class AnthropicSession(
         }
     }
 
-    override fun send(userText: String?, toolOutputs: List<ToolOutput>): AssistantTurn {
+    override fun send(userText: String?, toolOutputs: List<ToolOutput>): AssistantTurn = providerResult {
+        wire.checkActive()
         val blocks = mutableListOf<ContentBlockParam>()
         // All tool results for one assistant turn go back in a single user message.
         for (out in toolOutputs) {
@@ -97,21 +100,23 @@ class AnthropicSession(
                 if (config.effort.isNotBlank()) {
                     outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.of(config.effort)).build())
                 }
-                if (config.model in SERVER_FALLBACK_MODELS) {
-                    // If a safety classifier declines the request, let the API retry it on a
-                    // suitable model instead of stopping the task.
-                    putAdditionalHeader("anthropic-beta", "server-side-fallback-2026-07-01")
-                    putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
-                }
             }
             .build()
 
-        val response = client.messages().create(params)
+        val request = Request.Builder()
+            .url(wire.baseUrl.newBuilder().addPathSegments("v1/messages").build())
+            .header("anthropic-version", "2023-06-01")
+            .header("x-api-key", config.apiKey)
+            .post(jsonMapper().writeValueAsBytes(params._body()).toRequestBody(JSON))
+            .build()
+        val response = wire.execute(request) { reply ->
+            val body = reply.body ?: throw ProviderFailure("The provider returned no reply.")
+            jsonMapper().readValue(body.byteStream(), Message::class.java)
+        }
         history += response.toParam()
 
         if (response.stopReason().getOrNull() == StopReason.REFUSAL) {
-            val why = response.stopDetails().getOrNull()?.explanation()?.getOrNull()
-            return AssistantTurn("", emptyList(), stopNote = "The model declined this request${why?.let { ": $it" } ?: "."}")
+            return@providerResult AssistantTurn("", emptyList(), stopNote = "The model declined this request.")
         }
 
         val text = StringBuilder()
@@ -124,8 +129,16 @@ class AnthropicSession(
             }
         }
         val note = if (response.stopReason().getOrNull() == StopReason.MAX_TOKENS) "Response was cut off (max tokens)." else null
-        return AssistantTurn(text.toString(), calls, note)
+        wire.checkActive()
+        AssistantTurn(text.toString(), calls, note)
     }
+
+    // The Anthropic transport is buffered, but a cancelled request never publishes its reply.
+    override fun send(userText: String?, toolOutputs: List<ToolOutput>, onText: (String) -> Unit): AssistantTurn =
+        send(userText, toolOutputs).also { turn ->
+            wire.checkActive()
+            if (turn.text.isNotBlank()) onText(turn.text)
+        }
 
     private fun image(jpeg: ByteArray): ImageBlockParam = ImageBlockParam.builder()
         .source(
@@ -137,7 +150,6 @@ class AnthropicSession(
         .build()
 
     companion object {
-        /** Models that accept the server-side `fallbacks: "default"` parameter. */
-        private val SERVER_FALLBACK_MODELS = setOf("claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5")
+        private val JSON = "application/json".toMediaType()
     }
 }

@@ -4,19 +4,12 @@ import android.util.Base64
 import android.util.Log
 import android.os.SystemClock
 import com.jarvis.assistant.ProviderConfig
-import com.jarvis.assistant.ai.Endpoints
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Call
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.IOException
 import java.util.UUID
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Any server that speaks the OpenAI Chat Completions API with tool calling:
@@ -28,30 +21,11 @@ class OpenAiCompatibleSession(
     toolSpecs: List<ToolSpec>,
 ) : ChatSession {
 
-    /** A server on this phone: fail fast when it is down, give it time when it is busy reading a long prompt. */
-    private val onPhone = Endpoints.isLoopback(config.baseUrl)
+    private val wire = ProviderRequest(config.baseUrl, toolSpecs.isNotEmpty())
+    private val onPhone = wire.onPhone
     private val withTools = toolSpecs.isNotEmpty()
 
-    // One shared client (connection pool and threads); only the timeouts differ per session.
-    private val http = SHARED_CLIENT.newBuilder()
-        .connectTimeout(if (onPhone) 3 else 20, TimeUnit.SECONDS)
-        .readTimeout(
-            when {
-                onPhone && withTools -> 240L // a phone-control prompt is long and the phone's model is slow
-                onPhone -> 90L
-                else -> 120L
-            },
-            TimeUnit.SECONDS,
-        )
-        .build()
-
-    private val cancelled = AtomicBoolean(false)
-    private val activeCall = AtomicReference<Call?>(null)
-
-    override fun cancel() {
-        cancelled.set(true)
-        activeCall.getAndSet(null)?.cancel()
-    }
+    override fun cancel() = wire.cancel()
 
     private val tools = toolsJson(toolSpecs)
 
@@ -65,7 +39,8 @@ class OpenAiCompatibleSession(
         }
     }
 
-    override fun send(userText: String?, toolOutputs: List<ToolOutput>): AssistantTurn {
+    override fun send(userText: String?, toolOutputs: List<ToolOutput>): AssistantTurn = providerResult {
+        wire.checkActive()
         val images = mutableListOf<ByteArray>()
         for (out in toolOutputs) {
             messages += JSONObject().put("role", "tool").put("tool_call_id", out.callId)
@@ -87,47 +62,11 @@ class OpenAiCompatibleSession(
             messages += JSONObject().put("role", "user").put("content", if (images.isEmpty()) userText else parts)
         }
 
-        val body = buildBody(stream = false)
-
-        val bodyText = body.toString()
-        Log.i("JarvisTiming", "request provider=${config.preset.label} local=$onPhone promptChars=${bodyText.length}")
-        val request = Request.Builder()
-            .url(config.baseUrl.trimEnd('/') + "/chat/completions")
-            .apply { if (config.apiKey.isNotBlank()) header("Authorization", "Bearer ${config.apiKey}") }
-            .post(bodyText.toRequestBody("application/json".toMediaType()))
-            .build()
-
-        if (cancelled.get()) throw IOException("Cancelled")
-        val call = http.newCall(request)
-        activeCall.set(call)
-        if (cancelled.get()) call.cancel()
-
-        val requestStartedAt = SystemClock.elapsedRealtime()
-        val json = try {
-            val response = call.execute()
-            val headersAt = SystemClock.elapsedRealtime()
-            response.use { resp ->
-                val text = resp.body?.string().orEmpty()
-                val bodyReadAt = SystemClock.elapsedRealtime()
-                if (!resp.isSuccessful) {
-                    Log.e("JarvisAPI", "HTTP ${resp.code}: $text")
-                    throw IOException("HTTP ${resp.code} from ${config.preset.label}: ${text.take(500)}")
-                }
-                val parsed = JSONObject(text)
-                val parsedAt = SystemClock.elapsedRealtime()
-                Log.i(
-                    "JarvisTiming",
-                    "provider=${config.preset.label} model=${config.model} " +
-                        "headers=${headersAt - requestStartedAt}ms " +
-                        "body=${bodyReadAt - headersAt}ms " +
-                        "json=${parsedAt - bodyReadAt}ms " +
-                        "total=${parsedAt - requestStartedAt}ms"
-                )
-                parsed
-            }
-        } finally {
-            activeCall.compareAndSet(call, null)
+        val startedAt = SystemClock.elapsedRealtime()
+        val json = wire.execute(request(stream = false)) { response ->
+            JSONObject(response.body?.string().orEmpty())
         }
+        Log.i("JarvisTiming", "provider=compatible loopback=$onPhone total=${SystemClock.elapsedRealtime() - startedAt}ms")
 
         val choice = json.getJSONArray("choices").getJSONObject(0)
         val message = choice.getJSONObject("message")
@@ -147,13 +86,14 @@ class OpenAiCompatibleSession(
                 calls += ToolCall(c.getString("id"), fn.getString("name"), args)
             }
         }
+        wire.checkActive()
         messages += JSONObject().put("role", "assistant")
             .put("content", message.optString("content", "").takeUnless { message.isNull("content") } ?: "")
             .apply { if (rawCalls != null && rawCalls.length() > 0) put("tool_calls", rawCalls) }
 
         val finish = choice.optString("finish_reason")
         val note = if (finish == "length") "Response was cut off (max tokens)." else null
-        return AssistantTurn(message.optString("content", "").takeUnless { message.isNull("content") } ?: "", calls, note)
+        AssistantTurn(message.optString("content", "").takeUnless { message.isNull("content") } ?: "", calls, note)
     }
 
     private fun buildBody(stream: Boolean): JSONObject = JSONObject()
@@ -174,37 +114,26 @@ class OpenAiCompatibleSession(
         }
 
     /** Plain chat streams: [onText] gets each piece as it arrives, so speech can start with the first sentence. */
-    override fun send(userText: String?, toolOutputs: List<ToolOutput>, onText: (String) -> Unit): AssistantTurn {
-        // A reply with tool calls is only usable whole, so anything involving tools is not streamed.
-        if (tools.length() > 0 || toolOutputs.isNotEmpty() || userText == null) return super.send(userText, toolOutputs, onText)
-        messages += JSONObject().put("role", "user").put("content", userText)
-        val bodyText = buildBody(stream = true).toString()
-        Log.i("JarvisTiming", "stream request provider=${config.preset.label} local=$onPhone promptChars=${bodyText.length}")
-        val request = Request.Builder()
-            .url(config.baseUrl.trimEnd('/') + "/chat/completions")
-            .apply { if (config.apiKey.isNotBlank()) header("Authorization", "Bearer ${config.apiKey}") }
-            .post(bodyText.toRequestBody("application/json".toMediaType()))
-            .build()
-
-        if (cancelled.get()) throw IOException("Cancelled")
-        val call = http.newCall(request)
-        activeCall.set(call)
-        if (cancelled.get()) call.cancel()
-
-        val startedAt = SystemClock.elapsedRealtime()
-        var firstTokenAt = 0L
-        val text = StringBuilder()
-        try {
-            call.execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    val err = resp.body?.string().orEmpty()
-                    Log.e("JarvisAPI", "HTTP ${resp.code}: $err")
-                    throw IOException("HTTP ${resp.code} from ${config.preset.label}: ${err.take(500)}")
+    override fun send(userText: String?, toolOutputs: List<ToolOutput>, onText: (String) -> Unit): AssistantTurn =
+        providerResult {
+            wire.checkActive()
+            // Tool calls are only usable whole.
+            if (withTools || toolOutputs.isNotEmpty() || userText == null) {
+                return@providerResult send(userText, toolOutputs).also { turn ->
+                    wire.checkActive()
+                    if (turn.text.isNotBlank()) onText(turn.text)
                 }
-                val reader = (resp.body ?: throw IOException("Empty response")).byteStream().bufferedReader()
+            }
+            messages += JSONObject().put("role", "user").put("content", userText)
+            val startedAt = SystemClock.elapsedRealtime()
+            var firstTokenAt = 0L
+            val text = StringBuilder()
+            wire.execute(request(stream = true)) { response ->
+                val reader = (response.body ?: throw ProviderFailure("The provider returned no reply."))
+                    .byteStream().bufferedReader()
                 while (true) {
-                    if (cancelled.get()) throw IOException("Cancelled")
                     val line = reader.readLine() ?: break
+                    wire.checkActive()
                     val event = SseParser.parseLine(line)
                     if (event is SseParser.Event.Done) break
                     if (event is SseParser.Event.Text) {
@@ -214,14 +143,18 @@ class OpenAiCompatibleSession(
                     }
                 }
             }
-        } finally {
-            activeCall.compareAndSet(call, null)
+            val reply = text.toString()
+            val now = SystemClock.elapsedRealtime()
+            Log.i("JarvisTiming", "provider=compatible stream firstToken=${if (firstTokenAt > 0) firstTokenAt - startedAt else -1}ms total=${now - startedAt}ms")
+            messages += JSONObject().put("role", "assistant").put("content", reply)
+            AssistantTurn(reply, emptyList())
         }
-        val now = SystemClock.elapsedRealtime()
-        Log.i("JarvisTiming", "stream provider=${config.preset.label} firstToken=${if (firstTokenAt > 0) firstTokenAt - startedAt else -1}ms total=${now - startedAt}ms chars=${text.length}")
-        messages += JSONObject().put("role", "assistant").put("content", text.toString())
-        return AssistantTurn(text.toString(), emptyList(), null)
-    }
+
+    private fun request(stream: Boolean): Request = Request.Builder()
+        .url(wire.baseUrl.newBuilder().addPathSegments("chat/completions").build())
+        .apply { if (config.apiKey.isNotBlank()) header("Authorization", "Bearer ${config.apiKey}") }
+        .post(buildBody(stream).toString().toRequestBody(JSON))
+        .build()
 
     private fun maxTokens(): Int = when {
         withTools && onPhone -> 320
@@ -254,10 +187,9 @@ class OpenAiCompatibleSession(
     companion object {
         private const val KEEP_FULL_OBSERVATIONS = 1
         const val SCREEN_MARKER = "=== SCREEN"
-        private val SHARED_CLIENT: OkHttpClient by lazy { OkHttpClient.Builder().build() }
+        private val JSON = "application/json".toMediaType()
 
-        /** The OpenAI "tools" array for [specs]. Also used to warm the local model's prompt cache. */
-        fun toolsJson(specs: List<ToolSpec>): JSONArray = JSONArray().apply {
+        private fun toolsJson(specs: List<ToolSpec>): JSONArray = JSONArray().apply {
             specs.forEach { spec ->
                 put(
                     JSONObject().put("type", "function").put(

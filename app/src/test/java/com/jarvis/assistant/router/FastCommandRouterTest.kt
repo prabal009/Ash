@@ -10,6 +10,8 @@ class FastCommandRouterTest {
 
     @Test fun opensAppsInEnglish() {
         assertEquals(FastCommand.OpenApp("youtube"), p("open YouTube"))
+        assertEquals(FastCommand.OpenApp("whatsapp"), p("Hey Ash, open WhatsApp."))
+        assertEquals(FastCommand.OpenApp("whatsapp"), p("Hello Ash, open WhatsApp."))
         assertEquals(FastCommand.OpenApp("whatsapp"), p("Hey Jarvis, open WhatsApp."))
         assertEquals(FastCommand.OpenApp("chrome"), p("please launch the chrome app"))
         assertEquals(FastCommand.OpenApp("settings"), p("open settings"))
@@ -68,6 +70,9 @@ class FastCommandRouterTest {
     }
 
     @Test fun media() {
+        assertEquals(FastCommand.Media(MediaAction.PLAY), p("play"))
+        assertEquals(FastCommand.Media(MediaAction.PLAY), p("resume"))
+        assertEquals(FastCommand.Media(MediaAction.PAUSE), p("pause"))
         assertEquals(FastCommand.Media(MediaAction.PLAY), p("play music"))
         assertEquals(FastCommand.Media(MediaAction.PAUSE), p("pause the music"))
         assertEquals(FastCommand.Media(MediaAction.PAUSE), p("stop music"))
@@ -75,7 +80,9 @@ class FastCommandRouterTest {
         assertEquals(FastCommand.Media(MediaAction.PREVIOUS), p("previous song"))
         assertEquals(FastCommand.Media(MediaAction.PLAY), p("gaana bajao"))
         assertEquals(FastCommand.Media(MediaAction.NEXT), p("agla gaana"))
-        assertNull(p("play despacito"))
+        assertEquals(FastCommand.Media(MediaAction.PAUSE, "spotify"), p("pause on spotify"))
+        assertEquals(FastCommand.PlayMusic("despacito"), p("play despacito"))
+        assertEquals(FastCommand.PlayMusic("jazz", "spotify"), p("play jazz on spotify"))
     }
 
     @Test fun questionsAnsweredLocally() {
@@ -105,7 +112,9 @@ class FastCommandRouterTest {
     @Test fun dialOnlyWithRealNumbers() {
         assertEquals(FastCommand.Dial("9876543210"), p("call 9876543210"))
         assertEquals(FastCommand.Dial("9876543210"), p("9876543210 ko call karo"))
-        assertNull(p("call 98765")) // too short to be a number, and a name cannot contain digits
+        assertEquals(FastCommand.Dial("98765"), p("call 98765"))
+        // Malformed dial strings stay on the local dial path so FastActionExecutor refuses them instead of forwarding to an LLM.
+        assertEquals(FastCommand.Dial("*#06#"), p("call *#06#"))
     }
 
     @Test fun settingsPages() {
@@ -132,7 +141,7 @@ class FastCommandRouterTest {
     }
 
     @Test fun typingKeepsOriginalCase() {
-        assertEquals(FastCommand.TypeText("Hello World"), p("Type Hello World."))
+        assertEquals(FastCommand.TypeText("Hello World."), p("Type Hello World."))
         assertEquals(FastCommand.TypeText("see you at 5"), p("hey jarvis type see you at 5"))
     }
 
@@ -153,11 +162,11 @@ class FastCommandRouterTest {
         assertNull(p("hindi"))
     }
 
-    @Test fun playingOnYouTube() {
-        assertEquals(FastCommand.PlayYouTube("despacito"), p("open YouTube and play Despacito"))
-        assertEquals(FastCommand.PlayYouTube("lofi music"), p("play lofi music on youtube"))
-        assertEquals(FastCommand.PlayYouTube("arijit singh songs"), p("youtube par arijit singh songs chalao"))
-        assertEquals(FastCommand.PlayYouTube("kesariya"), p("kesariya youtube par bajao"))
+    @Test fun playingMusicAndMedia() {
+        assertEquals(FastCommand.PlayMusic("despacito", "youtube"), p("open YouTube and play Despacito"))
+        assertEquals(FastCommand.PlayMusic("lofi music", "youtube"), p("play lofi music on youtube"))
+        assertEquals(FastCommand.PlayMusic("arijit singh songs", "youtube"), p("youtube par arijit singh songs chalao"))
+        assertEquals(FastCommand.PlayMusic("kesariya", "youtube"), p("kesariya youtube par bajao"))
         assertEquals(FastCommand.WebSearch("cats", "youtube"), p("search cats on youtube"))
         assertEquals(FastCommand.OpenApp("youtube"), p("open youtube"))
         assertNull(p("open youtube and play the first video that you see in the list of recommended items"))

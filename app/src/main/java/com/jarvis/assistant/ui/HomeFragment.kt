@@ -27,7 +27,7 @@ class HomeFragment : Fragment() {
         _ui = FragmentHomeBinding.inflate(inflater, container, false)
         settings = Settings(requireContext())
         ui.powerButton.setOnClickListener {
-            if (JarvisService.running) JarvisService.stop(requireContext()) else startJarvis()
+            if (JarvisService.running) JarvisService.stop(requireContext()) else Setup.arm(requireActivity(), explain = true)
             ui.root.postDelayed({ if (_ui != null) refresh() }, 400)
         }
         ui.abortButton.setOnClickListener { if (JarvisService.running) startJarvis(JarvisService.ACTION_STOP_TASK) }
@@ -43,7 +43,7 @@ class HomeFragment : Fragment() {
             val report = CrashReporter.pending(requireContext()) ?: return@setOnClickListener
             startActivity(android.content.Intent.createChooser(
                 android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
-                    .putExtra(android.content.Intent.EXTRA_SUBJECT, "Jarvis crash report")
+                    .putExtra(android.content.Intent.EXTRA_SUBJECT, "Ash crash report")
                     .putExtra(android.content.Intent.EXTRA_TEXT, report),
                 getString(R.string.crash_share_title),
             ))
@@ -95,13 +95,13 @@ class HomeFragment : Fragment() {
             Phase.LISTENING -> getString(R.string.phase_listening)
             Phase.WORKING -> getString(R.string.phase_working)
         }
-        ui.statusText.text = if (running) JarvisService.status else getString(R.string.home_off_status)
+        ui.statusText.text = if (running || JarvisService.status != "Off") JarvisService.status else getString(R.string.home_off_status)
         val last = JarvisService.lastResult
         ui.lastResult.visibility = if (last != null && phase != Phase.WORKING) View.VISIBLE else View.GONE
         ui.lastResult.text = getString(R.string.last_task, last)
         ui.abortButton.visibility = if (phase == Phase.WORKING) View.VISIBLE else View.GONE
 
-        ui.powerButton.text = getString(if (running) R.string.turn_off else R.string.turn_on)
+        ui.powerButton.text = getString(if (running) R.string.turn_off else R.string.ash_arm)
         // Primary button when off; quiet outlined button when on.
         ui.powerButton.backgroundTintList = ColorStateList.valueOf(ctx.color(if (running) R.color.surface_high else R.color.accent))
         val fg = ctx.color(if (running) R.color.text else R.color.on_accent)
@@ -122,18 +122,18 @@ class HomeFragment : Fragment() {
     private fun runTypedCommand() {
         val task = ui.commandInput.text.toString().trim()
         if (task.isEmpty()) return
-        // Get out of the way so the agent can use the phone.
+        // Keep the UI visible for supported Android activity hand-offs.
         if (startJarvis(JarvisService.ACTION_RUN, task)) {
             ui.commandInput.setText("")
-            requireActivity().moveTaskToBack(true)
         }
     }
 
     private fun startJarvis(action: String? = null, task: String? = null): Boolean {
         val started = JarvisService.start(requireContext(), action, task)
         if (!started) {
-            Toast.makeText(requireContext(), getString(R.string.needs_mic), Toast.LENGTH_LONG).show()
-            requireActivity().requestPermissions(Setup.PERMISSIONS, 1)
+            val missingMic = !Setup.isDone(requireContext(), Setup.Item.MICROPHONE)
+            Toast.makeText(requireContext(), if (missingMic) R.string.needs_mic else R.string.ash_start_refused, Toast.LENGTH_LONG).show()
+            if (missingMic) requireActivity().requestPermissions(Setup.PERMISSIONS, 1)
         }
         return started
     }

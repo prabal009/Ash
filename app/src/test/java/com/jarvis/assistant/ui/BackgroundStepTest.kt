@@ -3,7 +3,7 @@ package com.jarvis.assistant.ui
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+import android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS
 import android.view.View
 import android.widget.TextView
 import androidx.core.view.ViewCompat
@@ -13,6 +13,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import com.jarvis.assistant.R
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -22,7 +23,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowLooper
 
-/** Regression tests for getting stuck on the "Stay awake for you" step. */
+/** Regression tests for the optional screen-off / default-assistant onboarding step and manifest compliance. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class BackgroundStepTest {
@@ -36,13 +37,19 @@ class BackgroundStepTest {
     }
 
     @Test
-    fun manifestDeclaresBatteryPermission() {
+    fun manifestAvoidsDisallowedBackgroundAndDirectCallPermissions() {
         val info = ctx.packageManager.getPackageInfo(ctx.packageName, PackageManager.GET_PERMISSIONS)
-        assertTrue(info.requestedPermissions!!.contains(Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS))
+        val perms = info.requestedPermissions?.toSet().orEmpty()
+        assertTrue(Manifest.permission.RECORD_AUDIO in perms)
+        assertTrue(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE in perms)
+        assertFalse(Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS in perms)
+        assertFalse(Manifest.permission.WAKE_LOCK in perms)
+        assertFalse(Manifest.permission.CALL_PHONE in perms)
+        assertFalse(Manifest.permission.READ_PHONE_STATE in perms)
     }
 
     @Test
-    fun allowOpensPromptThenContinueAnywayMovesOn() {
+    fun allowOpensDefaultAppsThenContinueAnywayMovesOn() {
         ActivityScenario.launch(OnboardingActivity::class.java).use { scenario ->
             scenario.onActivity { a ->
                 val primary = a.findViewById<TextView>(R.id.primaryButton)
@@ -52,10 +59,10 @@ class BackgroundStepTest {
                 // Microphone is granted, so it auto-advances; phone control isn't, so skip it.
                 shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(2))
                 a.findViewById<View>(R.id.skipButton).performClick()
-                assertEquals("Stay awake for you", title.text)
+                assertEquals(ctx.getString(R.string.ob_bg_title), title.text)
 
                 primary.performClick() // ALLOW
-                assertEquals(ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, shadowOf(a).nextStartedActivity.action)
+                assertEquals(ACTION_MANAGE_DEFAULT_APPS_SETTINGS, shadowOf(a).nextStartedActivity.action)
 
                 // User comes back without allowing it: they must not be stuck.
                 scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)

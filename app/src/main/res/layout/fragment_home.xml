@@ -33,8 +33,7 @@
                     style="@style/Jarvis.PageTitle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Jarvis"
-                    tools:ignore="HardcodedText" />
+                    android:text="@string/ash_app_name" />
             </LinearLayout>
 
             <TextView
@@ -181,7 +180,7 @@
             android:paddingHorizontal="12dp"
             android:textColor="@color/text_dim"
             android:textSize="15sp"
-            tools:text="Say &quot;Hey Jarvis&quot;" />
+            tools:text="Say “Hey Ash” or “Hello Ash”" />
 
         <TextView
             android:id="@+id/lastResult"
@@ -282,7 +281,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
             android:gravity="center"
-            tools:text="Try “Hey Jarvis, text Mum I’m on my way”"
+            tools:text="Try “Hello Ash, what time is it?”"
             android:textColor="@color/text_dim"
             android:textSize="12sp"
             tools:ignore="HardcodedText" />

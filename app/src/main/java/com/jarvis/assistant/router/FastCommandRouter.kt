@@ -1,6 +1,7 @@
 package com.jarvis.assistant.router
 
 import com.jarvis.assistant.ai.AiMode
+import com.jarvis.assistant.contacts.ContactMatcher
 
 /**
  * The fast path: recognises simple phone commands in English, Hinglish and Devanagari Hindi so they run in
@@ -43,8 +44,9 @@ object FastCommandRouter {
 
     private val DURATION = Regex("""(\d+)\s*(seconds?|secs?|minutes?|mins?|minat|hours?|hrs?|ghanta|ghante|ghantey)""")
     private val CLOCK = Regex("""\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje|bje)?(?=\s|$)""")
-    private val DIAL_A = Regex("""^(?:call|dial|phone)\s+(\+?[\d\s]{6,18})(?: karo| kar do)?$""")
-    private val DIAL_B = Regex("""^(\+?[\d\s]{6,18}) ko (?:call|phone|dial)(?: karo| kar do)?$""")
+    private val DIAL_A = Regex("""^(?:make a call to|place a call to|give a call to|call|dial|phone|ring) ([+\p{Nd} ]+?)(?: karo| kar do)?$""")
+    private val DIAL_B = Regex("""^([+\p{Nd} ]+?) ko (?:call|phone|dial)(?: karo| kar do)?$""")
+    private val DIAL_TEXT = Regex("""[+*#(]*[\p{Nd}+*#\t ().,;\-]*\p{Nd}[\p{Nd}+*#\t ().,;\-]*""")
 
     private val CALL_A = Regex("""^(?:make a call to|place a call to|give a call to|call|phone|ring|dial) (.+)$""")
     private val CALL_B = Regex("""^(.+?) ko (?:call|phone|dial)(?: karo| kar do| lagao| laga do| kijiye| kar de)?$|^(.+?) ko (?:phone|call) (?:lagao|laga do|karo|kar do)$""")
@@ -65,10 +67,12 @@ object FastCommandRouter {
 
     private val CAMERA = Regex("""^(?:open |launch |start )?(?:the )?camera(?: app)?(?: kholo| open karo| chalao| chalu karo)?$""")
 
-    private val YT_A = Regex("""^(?:open |launch |start )?youtube(?: app)? (?:and |then |aur )?(?:play|watch|chalao|bajao) (.+)$""")
-    private val YT_B = Regex("""^(?:play|watch) (.+?) (?:on|in|from) youtube$""")
-    private val YT_C = Regex("""^youtube (?:par|pe|me|mein) (.+?) (?:chalao|bajao|play karo|laga do|chala do|baja do|lagao|dikhao)$""")
-    private val YT_D = Regex("""^(.+?) youtube (?:par|pe|me|mein) (?:chalao|bajao|play karo|laga do|chala do|baja do|lagao)$|^(.+?) (?:chalao|bajao) youtube (?:par|pe|me|mein)$""")
+    private val MEDIA_SCOPE = Regex("""^(.+) (?:on|in|from) (.+?)(?: app)?$""")
+    private val PLAY_QUERY = Regex("""^play (.+)$""")
+    private val WATCH_QUERY = Regex("""^watch (.+)$""")
+    private val PLAY_AFTER_OPEN = Regex("""^(?:open|launch|start) (.+?)(?: app)? (?:and |then |aur )?(?:play|watch|chalao|bajao) (.+)$""")
+    private val PLAY_ON_YOUTUBE = Regex("""^youtube (?:play|watch|chalao|bajao) (.+)$""")
+    private val PLAY_YOUTUBE_HI = Regex("""^youtube (?:par|pe|me|mein) (.+?) (?:chalao|bajao|play karo|laga do|chala do|baja do|lagao|dikhao)$|^(.+?) youtube (?:par|pe|me|mein) (?:chalao|bajao|play karo|laga do|chala do|baja do|lagao)$|^(.+?) (?:chalao|bajao) youtube (?:par|pe|me|mein)$""")
 
     private val SEARCH_PREFIX_SITE = Regex("""^(youtube|google) (?:par|pe|me|mein|on|in) (?:search )?(.+?)(?: search karo| search kar do| dhundo| dhoondo)?$""")
     private val SEARCH_A = Regex("""^(?:search|google|look up|dhundo|dhoondo|khojo)(?: for)? (.+)$""")
@@ -76,7 +80,7 @@ object FastCommandRouter {
     private val SEARCH_SITE = Regex("""^(.+?) (?:on|in|par|pe|me|mein) (google|youtube)(?: search)?$""")
     private val IN_APP_WORDS = setOf("spotify", "amazon", "flipkart", "zomato", "swiggy", "instagram", "whatsapp", "telegram", "facebook", "twitter", "netflix", "hotstar", "gmail", "maps", "paytm", "phonepe", "uber", "ola")
 
-    private val TYPE_RAW = Regex("""^\W*(?:(?:hey|ok|okay)\s+jarvis\W*)?(?:please\s+)?type\s+(.+?)[\s.]*$""", RegexOption.IGNORE_CASE)
+    private val TYPE_RAW = Regex("""^(?:please\s+)?type\s+(.+)$""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
     private val TAP_A = Regex("""^(?:tap|click|press|touch|select|dabao|dabana)(?: on)?(?: the)? (.{1,30}?)(?: button| option| icon| tab)?$""")
     private val TAP_B = Regex("""^(.{1,30}?) (?:dabao|dabana|dabaiye|click karo|tap karo|press karo)$""")
     private val TAP_GENERIC = setOf("it", "this", "that", "screen", "anywhere", "here", "there", "something")
@@ -87,19 +91,19 @@ object FastCommandRouter {
 
     /** Returns the command if [raw] is a complete simple command, otherwise null. */
     fun parse(raw: String): FastCommand? {
-        val t = Lexicon.clean(raw)
+        val utterance = Lexicon.stripCommandAddress(raw)
+        typeText(utterance)?.let { return it }
+        val t = Lexicon.clean(utterance)
         if (t.isEmpty()) return null
         val words = t.split(' ')
         if (words.size > MAX_WORDS) return null
-        return mode(t) ?: language(t, words) ?: runtime(t)
+        return dial(t, utterance) ?: callContact(t)
+            ?: mode(t) ?: language(t, words) ?: runtime(t)
             ?: press(t) ?: screenshotOrLock(t) ?: scroll(words)
-            ?: volume(t, words) ?: flashlight(words) ?: media(words)
-            ?: query(t) ?: timerOrAlarm(t, words) ?: dial(t) ?: callContact(t)
-            ?: settingsPage(t, words) ?: camera(t)
-            ?: playYouTube(t)
-            ?: open(t)
-            ?: search(t)
-            ?: typeText(raw) ?: tap(t)
+            ?: media(words) ?: scopedMedia(t) ?: playMusic(t)
+            ?: volume(t, words) ?: flashlight(words)
+            ?: query(t) ?: timerOrAlarm(t, words) ?: settingsPage(t, words) ?: camera(t)
+            ?: open(t) ?: search(t) ?: tap(t)
     }
 
     /**
@@ -109,7 +113,7 @@ object FastCommandRouter {
     fun earlyAcceptDelayMs(raw: String): Long? = when (parse(raw)) {
         null -> null
         is FastCommand.OpenApp -> 800L
-        is FastCommand.Press, is FastCommand.Scroll, is FastCommand.Flashlight, is FastCommand.Media,
+        is FastCommand.Press, is FastCommand.Scroll, is FastCommand.Flashlight,
         is FastCommand.Ask, is FastCommand.SetMode, is FastCommand.SetLanguage, is FastCommand.OpenSettings, is FastCommand.RuntimeControl,
         FastCommand.Screenshot, FastCommand.LockScreen, FastCommand.OpenCamera,
         -> 600L
@@ -194,7 +198,11 @@ object FastCommandRouter {
         }
     }
 
-    private fun media(words: List<String>): FastCommand? {
+    private fun media(words: List<String>): FastCommand.Media? {
+        when (words.singleOrNull()) {
+            "play", "resume" -> return FastCommand.Media(MediaAction.PLAY)
+            "pause" -> return FastCommand.Media(MediaAction.PAUSE)
+        }
         if (words.size > 5) return null
         val hasMusic = words.any { it in MUSIC_WORDS }
         val rest = words.filterNot { it in MUSIC_WORDS || it in MEDIA_FILLER }
@@ -251,10 +259,12 @@ object FastCommandRouter {
         return FastCommand.SetAlarm(hour, minute)
     }
 
-    private fun dial(t: String): FastCommand? {
-        val m = DIAL_A.matchEntire(t) ?: DIAL_B.matchEntire(t) ?: return null
-        val number = m.groupValues[1].filter { it.isDigit() || it == '+' }
-        return if (number.count { it.isDigit() } >= 6) FastCommand.Dial(number) else null
+    private fun dial(t: String, raw: String): FastCommand? {
+        val parsed = DIAL_A.matchEntire(t) ?: DIAL_B.matchEntire(t) ?: return null
+        val number = DIAL_TEXT.find(raw)?.value?.trim().orEmpty()
+        val canonical = ContactMatcher.dialableNumber(number)
+        // Keep malformed dial strings on the local refusal path rather than silently dropping service codes.
+        return FastCommand.Dial(if (canonical == ContactMatcher.dialableNumber(parsed.groupValues[1])) canonical ?: number else raw)
     }
 
     private fun callContact(t: String): FastCommand? {
@@ -279,12 +289,30 @@ object FastCommandRouter {
 
     private fun camera(t: String): FastCommand? = if (CAMERA.matches(t)) FastCommand.OpenCamera else null
 
-    private fun playYouTube(t: String): FastCommand? {
-        val m = YT_A.matchEntire(t) ?: YT_B.matchEntire(t) ?: YT_C.matchEntire(t) ?: YT_D.matchEntire(t) ?: return null
-        val q = m.groupValues.drop(1).firstOrNull { it.isNotEmpty() }?.trim().orEmpty()
-        if (q.isEmpty() || q.split(' ').size > 8) return null
-        return FastCommand.PlayYouTube(q)
+    private fun scopedMedia(t: String): FastCommand? {
+        val scope = MEDIA_SCOPE.matchEntire(t) ?: return null
+        val command = scope.groupValues[1]
+        val target = scope.groupValues[2]
+        return media(command.split(' '))?.copy(app = target)
+            ?: playMusic(command, target)
     }
+
+    private fun playMusic(t: String, app: String? = null): FastCommand.PlayMusic? {
+        val query = (PLAY_QUERY.matchEntire(t) ?: if (app != null) WATCH_QUERY.matchEntire(t) else null)?.groupValues?.get(1)
+        if (query != null) return musicSearch(query, app)
+        if (app != null) return null
+        PLAY_AFTER_OPEN.matchEntire(t)?.let { m ->
+            return musicSearch(m.groupValues[2], m.groupValues[1])
+        }
+        val youtube = (PLAY_ON_YOUTUBE.matchEntire(t) ?: PLAY_YOUTUBE_HI.matchEntire(t))
+            ?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }
+        return youtube?.let { musicSearch(it, "youtube") }
+    }
+
+    private fun musicSearch(query: String, app: String?): FastCommand.PlayMusic? =
+        FastCommand.PlayMusic(query, app).takeIf {
+            query.split(' ').size <= 8 && (app == null || app.split(' ').size <= 4)
+        }
 
     private fun open(t: String): FastCommand? {
         val target = (OPEN_A.matchEntire(t) ?: OPEN_B.matchEntire(t))?.groupValues?.get(1)?.trim() ?: return null

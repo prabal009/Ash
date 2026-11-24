@@ -5,6 +5,9 @@ import android.content.Context
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import com.jarvis.assistant.service.JarvisService
+import com.jarvis.assistant.service.BootReceiver
+import android.content.Intent
+import org.junit.Assert.assertEquals
 import com.jarvis.assistant.voice.VoiceInput
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -28,14 +31,15 @@ class TurnOffTest {
     @Before
     fun setUp() {
         ctx.getSharedPreferences("jarvis", Context.MODE_PRIVATE).edit().clear().commit()
-        app.grantPermissions(Manifest.permission.RECORD_AUDIO)
+        app.grantPermissions(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
         JarvisService.resetForTest()
     }
 
     @Test
     fun turningOffStopsTheServiceWithoutStartingItAgain() {
         assertTrue(JarvisService.start(ctx))
-        assertTrue(Settings(ctx).switchedOn)
+        assertEquals(JarvisService.ACTION_ARM, app.nextStartedService?.action)
+        Settings(ctx).switchedOn = true // state set by the running, promoted service
         app.clearStartedServices()
 
         JarvisService.stop(ctx)
@@ -44,16 +48,18 @@ class TurnOffTest {
     }
 
     @Test
-    fun automaticStartsRespectTurnOff() {
-        JarvisService.stop(ctx)
+    fun bootNeverStartsCaptureEvenWhenRemindersAreOn() {
+        Settings(ctx).apply { switchedOn = true; startOnBoot = true }
         app.clearStartedServices()
-        JarvisService.startIfSwitchedOn(ctx) // e.g. phone control reconnecting, or boot
+        BootReceiver().onReceive(ctx, Intent(Intent.ACTION_BOOT_COMPLETED))
         assertNull(app.nextStartedService)
+    }
 
-        JarvisService.start(ctx)
-        app.clearStartedServices()
-        JarvisService.startIfSwitchedOn(ctx)
-        assertTrue(app.nextStartedService != null)
+    @Test
+    fun manualTalkDoesNotArmStandby() {
+        assertTrue(JarvisService.start(ctx, JarvisService.ACTION_LISTEN))
+        assertEquals(JarvisService.ACTION_LISTEN, app.nextStartedService?.action)
+        assertFalse(Settings(ctx).switchedOn)
     }
 
     @Test

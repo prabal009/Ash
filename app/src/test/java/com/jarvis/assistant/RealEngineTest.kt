@@ -1,49 +1,63 @@
 package com.jarvis.assistant
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.AudioRecord
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import com.jarvis.assistant.audio.AudioRouteController
+import com.jarvis.assistant.audio.AudioRoutePurpose
+import com.jarvis.assistant.audio.BuiltInPhoneAudioRouteController
 import com.jarvis.assistant.service.JarvisService
+import com.jarvis.assistant.voice.FloatAudioTrackShadow
 import com.jarvis.assistant.voice.Kokoro
+import com.jarvis.assistant.voice.ModelDownloader
+import com.jarvis.assistant.voice.Speaker
 import com.jarvis.assistant.voice.SpeechModel
+import com.jarvis.assistant.voice.SpeechPacer
 import com.jarvis.assistant.voice.VoiceInput
+import com.jarvis.assistant.voice.VoiceSpeed
 import com.jarvis.assistant.voice.WakeModel
+import com.jarvis.assistant.voice.makePaced
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
-import org.robolectric.Robolectric
-import org.robolectric.shadows.ShadowAudioRecord
-import com.jarvis.assistant.voice.ModelDownloader
-import com.jarvis.assistant.voice.Speaker
-import com.jarvis.assistant.voice.SpeechPacer
-import com.jarvis.assistant.voice.VoiceSpeed
-import com.jarvis.assistant.voice.makePaced
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
-import org.robolectric.shadows.ShadowAudioTrack
+import org.robolectric.shadows.AudioDeviceInfoBuilder
+import org.robolectric.shadows.ShadowAudioRecord
 import java.io.File
-import java.nio.ByteBuffer
 import java.time.Duration
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import java.util.Random
 
 /**
  * Runs the app's real voice code against the real sherpa-onnx engine (Linux build) and real models.
  * Skipped unless test-native/ is set up (see test-native/README.md).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], shadows = [FloatAudioTrackShadow::class])
 class RealEngineTest {
     private val ctx: Context = ApplicationProvider.getApplicationContext()
     private val native = File(System.getProperty("jarvis.nativeDir") ?: "test-native")
     private val models = File(native, "models")
+
+    private val testRouteController = object : AudioRouteController {
+        override fun acceptInputDevice(device: AudioDeviceInfo?, purpose: AudioRoutePurpose): Boolean = device != null
+    }
 
     @Before
     fun loadNative() {
@@ -53,9 +67,21 @@ class RealEngineTest {
         System.load(File(lib, "libonnxruntime.so").absolutePath)
         System.load(File(lib, "libsherpa-onnx-jni.so").absolutePath)
         ctx.getSharedPreferences("jarvis", Context.MODE_PRIVATE).edit().clear().commit()
-        org.robolectric.shadows.ShadowLog.stream = System.out
+        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+        shadowOf(ctx.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        val builtInMic = AudioDeviceInfoBuilder.newBuilder().setType(AudioDeviceInfo.TYPE_BUILTIN_MIC).build()
+        VoiceInput.routedDeviceOf = { builtInMic }
+        JarvisService.audioRouteControllerFactory = { testRouteController }
         JarvisService.resetForTest()
         seenListening = false
+    }
+
+    @After
+    fun restoreRoutedDevice() {
+        VoiceInput.routedDeviceOf = AudioRecord::getRoutedDevice
+        JarvisService.audioRouteControllerFactory = { BuiltInPhoneAudioRouteController }
     }
 
     private fun waitFor(timeoutMs: Long, cond: () -> Boolean): Boolean {
@@ -99,15 +125,16 @@ class RealEngineTest {
 
     private fun silence(seconds: Double) = FloatArray((seconds * 16000).toInt())
 
-    /** A simulated microphone that plays [script] in real time, then silence. */
+    /** A simulated microphone that plays [script] in real time over quiet room floor (~-76 dBFS). */
     private fun playIntoMic(vararg parts: FloatArray) {
         val script = parts.reduce { a, b -> a + b }
         var pos = 0
+        val rng = Random(42)
         ShadowAudioRecord.setSource(object : ShadowAudioRecord.AudioRecordSource {
             override fun readInShortArray(audioData: ShortArray, offsetInShorts: Int, sizeInShorts: Int, isBlocking: Boolean): Int {
                 Thread.sleep(sizeInShorts * 1000L / 16000) // real time
                 for (i in 0 until sizeInShorts) {
-                    val v = if (pos < script.size) script[pos] else 0f
+                    val v = (if (pos < script.size) script[pos] else 0f) + (rng.nextGaussian() * 0.00015).toFloat()
                     audioData[offsetInShorts + i] = (v.coerceIn(-1f, 1f) * 32767).toInt().toShort()
                     pos++
                 }
@@ -119,9 +146,10 @@ class RealEngineTest {
     /** Status at the moment the scenario ended (before the service is shut down). */
     private var finalStatus = ""
 
+    private fun armIntent() = Intent(ctx, JarvisService::class.java).setAction(JarvisService.ACTION_ARM)
+
     private fun runService(timeoutMs: Long, until: () -> Boolean): Boolean {
-        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>()).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
-        val controller = Robolectric.buildService(JarvisService::class.java).create().startCommand(0, 1)
+        val controller = Robolectric.buildService(JarvisService::class.java, armIntent()).create().startCommand(0, 1)
         try {
             return waitFor(timeoutMs, until)
         } finally {
@@ -142,9 +170,8 @@ class RealEngineTest {
                 return sizeInShorts
             }
         })
-        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>()).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
         // Turn on, then off straight away while the models are still loading.
-        Robolectric.buildService(JarvisService::class.java).create().startCommand(0, 1).destroy()
+        Robolectric.buildService(JarvisService::class.java, armIntent()).create().startCommand(0, 1).destroy()
         waitFor(5000) { false } // plenty of time for the models to finish loading
         val before = reads.get()
         waitFor(1000) { false }
@@ -156,36 +183,54 @@ class RealEngineTest {
     fun customPhraseStartsACommandWithoutBecomingPartOfIt() {
         installAll()
         Settings(ctx).apply { customWakePhrase = "Hello World"; switchedOn = true }
-        playIntoMic(silence(1.5), say("Hello world, turn on the flashlight."), silence(6.0))
+        playIntoMic(silence(1.5), say("Hello world, what time is it?"), silence(6.0))
         assertTrue(runService(25_000) { JarvisService.lastTask != null })
         val task = JarvisService.lastTask!!.lowercase()
-        assertTrue(task, "flashlight" in task || "flash light" in task)
+        assertTrue(task, "time" in task)
         assertFalse(task, "world" in task || "hello" in task)
     }
 
     @Test
-    fun oneBreathCommandIsHeardAndStarted() {
+    fun heyAshOneBreathCommandIsHeardAndStarted() {
         installAll()
-        playIntoMic(silence(1.5), say("Hey Jarvis, send my wife a message on WhatsApp and tell her I love her."), silence(6.0))
+        playIntoMic(silence(1.5), say("Hey Ash, send my wife a message on WhatsApp and tell her I love her.", voice = 6), silence(6.0))
         val started = runService(40_000) { JarvisService.lastTask != null }
         assertTrue("command reached the agent: ${JarvisService.lastTask}", started)
         val task = JarvisService.lastTask!!.lowercase()
-        assertTrue(task, "send my wife" in task && "app" in task && "love her" in task)
-        assertFalse("wake word stripped: $task", task.startsWith("hey"))
+        assertTrue(task, task.startsWith("send my wife") && "app" in task && "love her" in task)
     }
 
     @Test
-    fun pauseAfterWakeWordStillGetsTheCommand() {
+    fun helloAshOneBreathCommandIsHeardAndStarted() {
         installAll()
-        playIntoMic(silence(1.0), say("Hey Jarvis."), silence(2.5), say("Turn on the flashlight."), silence(6.0))
+        playIntoMic(silence(1.5), say("Hello Ash, what time is it?"), silence(6.0))
+        val started = runService(40_000) { JarvisService.lastTask != null }
+        assertTrue("command reached router: ${JarvisService.lastTask}", started)
+        val task = JarvisService.lastTask!!.lowercase()
+        assertTrue(task, "time" in task)
+        assertFalse("wake word stripped: $task", task.startsWith("hello"))
+    }
+
+    @Test
+    fun pauseAfterHeyAshStillGetsTheCommand() {
+        installAll()
+        playIntoMic(silence(1.0), say("Hey Ash.", voice = 1), silence(2.5), say("What time is it?", voice = 1), silence(6.0))
         assertTrue(runService(40_000) { JarvisService.lastTask != null })
-        assertTrue(JarvisService.lastTask!!, "turn on the flashlight" in JarvisService.lastTask!!.lowercase())
+        assertTrue(JarvisService.lastTask!!, "time" in JarvisService.lastTask!!.lowercase())
+    }
+
+    @Test
+    fun pauseAfterHelloAshStillGetsTheCommand() {
+        installAll()
+        playIntoMic(silence(1.0), say("Hello Ash."), silence(2.5), say("What time is it?"), silence(6.0))
+        assertTrue(runService(40_000) { JarvisService.lastTask != null })
+        assertTrue(JarvisService.lastTask!!, "time" in JarvisService.lastTask!!.lowercase())
     }
 
     @Test
     fun saysSorryWhenNothingFollowsTheWakeWord() {
         installAll()
-        playIntoMic(silence(1.0), say("Hey Jarvis."), silence(14.0))
+        playIntoMic(silence(1.0), say("Hey Ash."), silence(14.0))
         assertTrue(runService(40_000) { JarvisService.status == "Didn't catch that" })
         assertTrue("no task started", JarvisService.lastTask == null)
     }
@@ -193,12 +238,89 @@ class RealEngineTest {
     private var seenListening = false
 
     @Test
-    fun soundAlikesDoNotWakeJarvis() {
+    fun soundAlikesAndBareAshDoNotWakeAsh() {
         installAll()
-        playIntoMic(silence(1.0), say("Hey Travis, how are you?"), silence(1.0), say("The harvest is almost ready."),
-            silence(1.0), say("Have you seen my car keys?"), silence(2.0))
-        runService(16_000) { JarvisService.status == "Listening…" }
-        assertTrue("never woke: $finalStatus", finalStatus.startsWith("Say") && !seenListening)
+        playIntoMic(
+            silence(1.0),
+            say("Hey cash, how are you?"), silence(1.0),
+            say("Hey ask about the flash."), silence(1.0),
+            say("Take out the trash and wash the car."), silence(1.0),
+            say("Ash."), silence(1.0),
+            say("Hey Jarvis, turn on the flashlight."), silence(2.0),
+        )
+        runService(22_000) { JarvisService.status == "Listening…" }
+        assertTrue("never woke: $finalStatus", finalStatus.startsWith("Listening for") && !seenListening)
+    }
+
+    @Test
+    fun dualWakeKeywordMatrixOnRealEngine() {
+        installAll()
+        val dir = WakeModel.dir(ctx)
+        val voices = listOf(5, 6, 9, 1)
+        val heyPositives = listOf("Hey Ash.", "Hey Ash, what time is it?", "Hey Ash, turn on the flashlight.")
+        val helloPositives = listOf("Hello Ash.", "Hello Ash, what time is it?", "Hello Ash, pause the music.")
+        val negatives = listOf(
+            "Hey cash, how are you?",
+            "Hey ask about the flash.",
+            "Take out the trash and wash the car.",
+            "Ash.",
+            "Hey Jarvis, turn on the flashlight.",
+            "Flashlight on.",
+        )
+        val heyAudio = voices.flatMap { v -> heyPositives.map { p -> "v=$v [$p]" to say(p, v) } }
+        val helloAudio = voices.flatMap { v -> helloPositives.map { p -> "v=$v [$p]" to say(p, v) } }
+        val negAudio = listOf(5, 9).flatMap { v -> negatives.map { n -> "v=$v [$n]" to say(n, v) } }
+
+        val kwFile = File(dir, "ash_keywords_eval.txt").apply { writeText(WakeModel.KEYWORDS) }
+        val spotter = com.k2fsa.sherpa.onnx.KeywordSpotter(
+            config = com.k2fsa.sherpa.onnx.KeywordSpotterConfig(
+                featConfig = com.k2fsa.sherpa.onnx.FeatureConfig(sampleRate = 16000, featureDim = 80),
+                modelConfig = com.k2fsa.sherpa.onnx.OnlineModelConfig(
+                    transducer = com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig(
+                        encoder = File(dir, WakeModel.ENCODER).absolutePath,
+                        decoder = File(dir, WakeModel.DECODER).absolutePath,
+                        joiner = File(dir, WakeModel.JOINER).absolutePath,
+                    ),
+                    tokens = File(dir, "tokens.txt").absolutePath,
+                    numThreads = 1,
+                ),
+                keywordsFile = kwFile.absolutePath,
+                keywordsScore = 2.0f,
+                keywordsThreshold = 0.1f,
+            ),
+        )
+        fun detect(pcm: FloatArray): List<String> {
+            val stream = spotter.createStream("")
+            val hits = mutableListOf<String>()
+            val padded = silence(0.5) + pcm + silence(1.0)
+            var pos = 0
+            while (pos < padded.size) {
+                val end = minOf(pos + 1600, padded.size)
+                stream.acceptWaveform(padded.copyOfRange(pos, end), 16000)
+                while (spotter.isReady(stream)) {
+                    spotter.decode(stream)
+                    val k = spotter.getResult(stream).keyword
+                    if (k.isNotBlank()) {
+                        hits += k
+                        spotter.reset(stream)
+                    }
+                }
+                pos = end
+            }
+            stream.release()
+            return hits
+        }
+        try {
+            val heyHits = heyAudio.count { (_, pcm) -> "HEY_ASH" in detect(pcm) }
+            val helloHits = helloAudio.count { (_, pcm) -> "HELLO_ASH" in detect(pcm) }
+            val falseHits = negAudio.mapNotNull { (name, pcm) -> detect(pcm).takeIf { it.isNotEmpty() }?.let { "$name -> $it" } }
+            println("KWS [production]: HEY_ASH=$heyHits/${heyAudio.size} HELLO_ASH=$helloHits/${helloAudio.size} FALSE=${falseHits.size}/${negAudio.size} $falseHits")
+            assertTrue("HEY_ASH recall too low: $heyHits/${heyAudio.size}", heyHits >= 6)
+            assertTrue("HELLO_ASH recall too low: $helloHits/${helloAudio.size}", helloHits >= 10)
+            assertEquals("unexpected false wakes: $falseHits", emptyList<String>(), falseHits)
+        } finally {
+            spotter.release()
+        }
     }
 
     @Test
@@ -342,15 +464,16 @@ class RealEngineTest {
 
     // ---- Conversation ----
 
-    /** A microphone that plays whatever is queued (in real time), and silence otherwise. */
+    /** A microphone that plays whatever is queued (in real time), and quiet room floor otherwise. */
     private val live = java.util.concurrent.LinkedBlockingDeque<Float>()
     private fun liveMic() {
         live.clear()
+        val rng = Random(7)
         ShadowAudioRecord.setSource(object : ShadowAudioRecord.AudioRecordSource {
             override fun readInShortArray(audioData: ShortArray, offsetInShorts: Int, sizeInShorts: Int, isBlocking: Boolean): Int {
                 Thread.sleep(sizeInShorts * 1000L / 16000)
                 for (i in 0 until sizeInShorts) {
-                    val v = live.pollFirst() ?: 0f
+                    val v = (live.pollFirst() ?: 0f) + (rng.nextGaussian() * 0.00015).toFloat()
                     audioData[offsetInShorts + i] = (v.coerceIn(-1f, 1f) * 32767).toInt().toShort()
                 }
                 return sizeInShorts
@@ -367,7 +490,7 @@ class RealEngineTest {
 
     private fun loadedVoice(): VoiceInput {
         shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>()).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
-        val voice = VoiceInput(ctx) {}
+        val voice = VoiceInput(ctx, testRouteController) {}
         voice.echoCancellation = false // worst case: the phone has no echo cancellation at all
         var loaded = false
         voice.load { loaded = true }
@@ -492,16 +615,15 @@ class RealEngineTest {
     fun followUpNeedsNoWakeWord() {
         installAll()
         liveMic()
-        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>()).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
-        val controller = Robolectric.buildService(JarvisService::class.java).create().startCommand(0, 1)
+        val controller = Robolectric.buildService(JarvisService::class.java, armIntent()).create().startCommand(0, 1)
         try {
-            assertTrue(waitFor(30_000) { JarvisService.status.startsWith("Say") })
-            speakIntoMic(say("Hey Jarvis, turn on the flashlight."))
+            assertTrue(waitFor(30_000) { JarvisService.status.startsWith("Listening for") })
+            speakIntoMic(say("Hey Ash, turn on the flashlight."))
             assertTrue(waitFor(30_000) { JarvisService.lastTask != null })
             // No phone control in tests, so the task ends straight away with a spoken explanation.
             assertTrue(waitFor(60_000) { JarvisService.lastResult != null })
             val first = JarvisService.lastTask
-            // Wait until Jarvis has finished replying and is listening for a follow-up.
+            // Wait until Ash has finished replying and is listening for a follow-up.
             assertTrue("listening for a follow-up", waitFor(60_000) { JarvisService.phase == JarvisService.Companion.Phase.LISTENING })
             speakIntoMic(say("Now turn it off again."))
             assertTrue(waitFor(30_000) { JarvisService.lastTask != first })
@@ -516,13 +638,12 @@ class RealEngineTest {
     fun talkingOverTheReplyStartsTheNextCommand() {
         installAll()
         liveMic()
-        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>()).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
-        val controller = Robolectric.buildService(JarvisService::class.java).create().startCommand(0, 1)
+        val controller = Robolectric.buildService(JarvisService::class.java, armIntent()).create().startCommand(0, 1)
         try {
-            assertTrue(waitFor(30_000) { JarvisService.status.startsWith("Say") })
-            speakIntoMic(say("Hey Jarvis, turn on the flashlight."))
+            assertTrue(waitFor(30_000) { JarvisService.status.startsWith("Listening for") })
+            speakIntoMic(say("Hello Ash, turn on the flashlight."))
             assertTrue(waitFor(60_000) { JarvisService.lastResult != null })
-            // Jarvis is now saying the result; interrupt it straight away.
+            // Ash is now saying the result; interrupt it straight away.
             speakIntoMic(say("Never mind, open the camera instead."))
             assertTrue(waitFor(30_000) { JarvisService.lastTask?.lowercase()?.contains("camera") == true })
             println("BARGE-IN task=${JarvisService.lastTask}")

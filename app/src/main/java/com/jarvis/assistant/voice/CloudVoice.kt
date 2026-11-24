@@ -3,13 +3,18 @@ package com.jarvis.assistant.voice
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.jarvis.assistant.CLOUD_VOICES
 import com.jarvis.assistant.CloudVoiceConfig
+import com.jarvis.assistant.ai.Endpoints
+import com.jarvis.assistant.ai.Endpoints.configureLocalTransport
+import com.jarvis.assistant.ai.InvalidProviderEndpoint
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.InterruptedIOException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -22,10 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 class CloudVoice {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "cloud-voice") }
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
     @Volatile private var call: Call? = null
 
     /** The last problem, shown in Settings so a bad key or voice ID isn't a silent failure. */
@@ -43,20 +44,25 @@ class CloudVoice {
         val (request, rate) = try {
             request(config, text, speed)
         } catch (e: Exception) {
+            val error = if (e is InvalidProviderEndpoint) {
+                "Use HTTPS for remote voices, or a valid local HTTP address."
+            } else {
+                "Couldn't request speech from ${name(config)}. Check the voice settings."
+            }
             main.post {
                 if (AudioOut.isCurrent(ticket)) {
-                    val error = "Couldn't request speech from ${name(config)}: ${e.message}"
-                    lastError = error
                     onFail(error)
                 }
             }
             return
         }
-        val c = http.newCall(request)
+        val c = (if (Endpoints.isLocal(request.url)) LOCAL_HTTP else HTTP).newCall(request)
         call = c
         val waitingForAudio = AtomicBoolean(true)
+        val firstAudioExpired = AtomicBoolean(false)
         val timeout = Runnable {
             if (AudioOut.isCurrent(ticket) && waitingForAudio.compareAndSet(true, false)) {
+                firstAudioExpired.set(true)
                 c.cancel()
                 val error = "${name(config)} didn't send audio in time."
                 lastError = error
@@ -69,7 +75,7 @@ class CloudVoice {
                 if (!AudioOut.isCurrent(ticket) || c.isCanceled()) return@execute
                 c.execute().use { response ->
                     if (!response.isSuccessful) {
-                        problem(config, response.code, response.body?.string().orEmpty())
+                        problem(config, response.code)
                     } else if (response.body?.source()?.request(2) != true) {
                         "${name(config)} returned no audio."
                     } else {
@@ -80,15 +86,16 @@ class CloudVoice {
                     }
                 }
             } catch (e: Exception) {
-                if (!AudioOut.isCurrent(ticket) || c.isCanceled()) return@execute
-                Log.w(TAG, "cloud voice failed", e)
-                "Couldn't reach ${name(config)}: ${e.message ?: e.javaClass.simpleName}"
+                if (!AudioOut.isCurrent(ticket) || firstAudioExpired.get()) return@execute
+                Log.w(TAG, "cloud voice request failed")
+                if (e is InterruptedIOException) "${name(config)} didn't finish sending audio in time."
+                else "Couldn't reach ${name(config)}."
             } finally {
                 waitingForAudio.set(false)
                 main.removeCallbacks(timeout)
             }
             main.post {
-                if (AudioOut.isCurrent(ticket) && !c.isCanceled()) {
+                if (AudioOut.isCurrent(ticket) && !firstAudioExpired.get() && (failure != null || !c.isCanceled())) {
                     lastError = failure
                     if (failure == null) onDone() else onFail(failure)
                 }
@@ -117,6 +124,9 @@ class CloudVoice {
 
     /** Builds the provider's request for raw 16-bit mono PCM. Returns the request and its sample rate. */
     private fun request(c: CloudVoiceConfig, text: String, speed: Float): Pair<Request, Int> {
+        val preset = CLOUD_VOICES.first { it.id == c.id }
+        require(!preset.needsKey || c.apiKey.isNotBlank())
+        val base = Endpoints.requireHttpUrl(c.baseUrl)
         val json = "application/json".toMediaType()
         return when (c.id) {
             "elevenlabs" -> {
@@ -125,7 +135,8 @@ class CloudVoice {
                     .put("model_id", c.model)
                     .put("voice_settings", JSONObject().put("speed", speed.coerceIn(0.7f, 1.2f).toDouble()))
                 Request.Builder()
-                    .url("${c.baseUrl}/text-to-speech/${c.voice}/stream?output_format=pcm_24000")
+                    .url(base.newBuilder().addPathSegment("text-to-speech").addPathSegment(c.voice)
+                        .addPathSegment("stream").addQueryParameter("output_format", "pcm_24000").build())
                     .header("xi-api-key", c.apiKey)
                     .post(body.toString().toRequestBody(json))
                     .build() to 24000
@@ -139,7 +150,7 @@ class CloudVoice {
                     .put("prosody", JSONObject().put("speed", speed.coerceIn(0.5f, 2f).toDouble()))
                 if (c.voice.isNotBlank()) body.put("reference_id", c.voice)
                 Request.Builder()
-                    .url("${c.baseUrl}/tts")
+                    .url(base.newBuilder().addPathSegment("tts").build())
                     .header("Authorization", "Bearer ${c.apiKey}")
                     .header("model", c.model)
                     .post(body.toString().toRequestBody(json))
@@ -154,7 +165,7 @@ class CloudVoice {
                     .put("speed", speed.coerceIn(0.25f, 4f).toDouble())
                 if (c.model.startsWith("gpt-4o")) body.put("instructions", JARVIS_STYLE)
                 val builder = Request.Builder()
-                    .url("${c.baseUrl}/audio/speech")
+                    .url(base.newBuilder().addPathSegments("audio/speech").build())
                     .post(body.toString().toRequestBody(json))
                 if (c.apiKey.isNotBlank()) builder.header("Authorization", "Bearer ${c.apiKey}")
                 builder.build() to 24000
@@ -162,30 +173,32 @@ class CloudVoice {
         }
     }
 
-    private fun problem(c: CloudVoiceConfig, code: Int, body: String): String {
-        val detail = runCatching {
-            val o = JSONObject(body)
-            o.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
-                ?: o.optJSONObject("detail")?.optString("message")?.takeIf { it.isNotBlank() }
-                ?: o.optString("message").takeIf { it.isNotBlank() }
-                ?: o.optString("detail").takeIf { it.isNotBlank() }
-        }.getOrNull() ?: body.take(160)
+    private fun problem(c: CloudVoiceConfig, code: Int): String {
         val hint = when (code) {
             401, 403 -> "check the API key"
             402 -> "the account is out of credit"
             404 -> "check the voice ID and model"
             429 -> "too many requests; try again shortly"
+            in 300..399 -> "redirected the request; configure the final endpoint"
             else -> "error $code"
         }
-        return "${name(c)}: $hint. $detail".trim()
+        return "${name(c)}: $hint."
     }
 
-    private fun name(c: CloudVoiceConfig) = com.jarvis.assistant.CLOUD_VOICES.firstOrNull { it.id == c.id }?.name ?: c.id
+    private fun name(c: CloudVoiceConfig) = CLOUD_VOICES.firstOrNull { it.id == c.id }?.name ?: "Speech provider"
 
     companion object {
         private const val FIRST_AUDIO_TIMEOUT_MS = 1500L
         private const val TAG = "CloudVoice"
+        private val HTTP = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(60, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+        private val LOCAL_HTTP = HTTP.newBuilder().configureLocalTransport().build()
         /** How gpt-4o voices are asked to sound. */
-        const val JARVIS_STYLE = "Speak like a calm, composed British butler: warm, clear and concise, with a hint of dry wit."
+        const val JARVIS_STYLE = "Speak like a calm, helpful personal assistant: warm, clear and concise."
     }
 }

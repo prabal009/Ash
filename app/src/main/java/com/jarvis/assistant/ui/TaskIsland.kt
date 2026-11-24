@@ -296,7 +296,7 @@ class TaskIsland(private val service: AccessibilityService) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             }
-            title = "Jarvis task island"
+            title = "Ash task island"
         }
         return try {
             wm.addView(b.root, p)

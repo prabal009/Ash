@@ -2,107 +2,191 @@ package com.jarvis.assistant.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Rect
+import android.os.Build
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.jarvis.assistant.agent.SensitiveActions
+import org.json.JSONObject
+import java.security.MessageDigest
+import java.util.Base64
 
-/** A numbered snapshot of what's on screen. Element ids are only valid until the next snapshot. */
-class ScreenSnapshot(
-    val text: String,
-    val elements: Map<Int, AccessibilityNodeInfo>,
-    val foregroundPackage: String?,
+internal data class WindowContext(
+    val packageName: String,
+    val windowId: Int,
+    val bounds: String,
+    val title: String?,
+    val epoch: Long,
 )
 
-object ScreenReader {
-    private const val MAX_ELEMENTS = 300
-    private const val MAX_TEXT = 100
+internal data class ScreenContext(val window: WindowContext, val fingerprint: String)
 
-    /** [maxElements] caps how many elements are listed. Small local models get a shorter list to keep prompts short. */
-    fun capture(service: AccessibilityService, maxElements: Int = MAX_ELEMENTS): ScreenSnapshot {
+/** A numbered observation. IDs refer to nodes in this exact observation, not the current screen in general. */
+class ScreenSnapshot internal constructor(
+    val text: String,
+    val elements: Map<Int, AccessibilityNodeInfo> = emptyMap(),
+    internal val context: ScreenContext? = null,
+    internal val stamps: Map<Int, NodeStamp> = emptyMap(),
+) {
+    val foregroundPackage: String? get() = context?.window?.packageName
+}
+
+internal data class NodeStamp(
+    val bounds: String,
+    val className: String?,
+    val resource: String?,
+    val text: String?,
+    val description: String?,
+    val hint: String?,
+    val inputType: Int,
+    val actions: List<Int>,
+    val state: Int,
+    val childCount: Int,
+) {
+    companion object {
+        fun of(node: AccessibilityNodeInfo) = NodeStamp(
+            Rect().also(node::getBoundsInScreen).flattenToString(),
+            node.className?.toString(), node.viewIdResourceName,
+            node.text?.toString(), node.contentDescription?.toString(), node.hintText?.toString(),
+            node.inputType, node.actionList.map { it.id },
+            (if (node.isEnabled) 1 else 0) or (if (node.isClickable) 2 else 0) or
+                (if (node.isEditable) 4 else 0) or (if (node.isScrollable) 8 else 0) or
+                (if (node.isCheckable) 16 else 0) or (if (node.isChecked) 32 else 0) or
+                (if (node.isSelected) 64 else 0) or (if (node.isFocused) 128 else 0),
+            node.childCount,
+        )
+    }
+}
+
+internal object ScreenReader {
+    private const val MAX_NODES = 1_200
+    private const val MAX_DEPTH = 60
+    private const val MAX_NODE_TEXT = 4_096
+    private const val MAX_LIST_TEXT = 100
+
+    data class Foreground(val context: WindowContext, val root: AccessibilityNodeInfo, val bounds: Rect)
+
+    /** Only the active app, never a fallback root, keyboard, system dialog, or other overlapping window. */
+    fun foreground(service: AccessibilityService, epoch: Long): Foreground? {
+        val activeRoot = service.rootInActiveWindow ?: return null
+        val windows = service.windows
+        val window = windows.singleOrNull {
+            it.id == activeRoot.windowId && it.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                (it.isActive || it.isFocused)
+        } ?: return null
+        val root = window.root ?: return null
+        val pkg = root.packageName?.toString()?.takeIf { it.isNotBlank() } ?: return null
+        if (root != activeRoot || root.windowId != window.id || pkg == service.packageName ||
+            SensitiveActions.isProtectedPackage(pkg) || isProtectedNode(root)) return null
+        val title = window.title?.toString()
+        if (title != null && SensitiveActions.isProtectedLabel(title)) return null
+        val bounds = Rect().also(window::getBoundsInScreen)
+        if (bounds.isEmpty) return null
+        for (cover in windows) {
+            if (cover.layer <= window.layer || cover.id == window.id) continue
+            val coverBounds = Rect().also(cover::getBoundsInScreen)
+            if (!Rect.intersects(bounds, coverBounds)) continue
+            val coverRoot = cover.root
+            val coverPackage = coverRoot?.packageName?.toString()
+            if (cover.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY && coverPackage == service.packageName) continue
+            // We never read or target the keyboard. Android still reports the app as the active root.
+            if (cover.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD && !cover.isActive) continue
+            if (cover.type == AccessibilityWindowInfo.TYPE_SYSTEM && !cover.isActive && !cover.isFocused &&
+                coverPackage == "com.android.systemui" &&
+                coverRoot?.viewIdResourceName?.substringAfter(":id/") in systemBars) continue
+            return null
+        }
+        return Foreground(WindowContext(pkg, window.id, bounds.flattenToString(), title, epoch), root, bounds)
+    }
+
+    /** Scan the entire visible tree for protected/opaque UI before exposing even a prefix of it. */
+    fun capture(foreground: Foreground, maxElements: Int, render: Boolean): ScreenSnapshot? {
+        val context = foreground.context
         val elements = LinkedHashMap<Int, AccessibilityNodeInfo>()
-        val out = StringBuilder()
-        var foreground: String? = null
+        val stamps = LinkedHashMap<Int, NodeStamp>()
+        val out = if (render) StringBuilder("Foreground app: ${context.packageName}\n") else null
+        val digest = MessageDigest.getInstance("SHA-256")
+        var visited = 0
+        var meaningful = false
 
-        val windows = runCatching { service.windows }.getOrDefault(emptyList())
-            .sortedByDescending { it.layer }
-        val roots: List<Pair<String, AccessibilityNodeInfo>> = if (windows.isNotEmpty()) {
-            windows.mapNotNull { w ->
-                val root = w.root ?: return@mapNotNull null
-                if (root.packageName == service.packageName) return@mapNotNull null
-                if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION && foreground == null) {
-                    foreground = root.packageName?.toString()
+        fun walk(node: AccessibilityNodeInfo, depth: Int): Boolean {
+            if (++visited > MAX_NODES || depth > MAX_DEPTH) return false
+            if (!node.isVisibleToUser) return true
+            if (node.windowId != context.windowId || node.packageName?.toString() != context.packageName ||
+                isProtectedNode(node)) return false
+            val stamp = NodeStamp.of(node)
+            val fields = listOf(stamp.text, stamp.description, stamp.hint, stamp.resource, stamp.className)
+            if (fields.any { it != null && (it.length > MAX_NODE_TEXT || SensitiveActions.isProtectedLabel(it)) }) return false
+            if (stamp.className == "android.webkit.WebView" && stamp.childCount == 0) return false
+
+            // Length-prefix every field, preserving values and boundaries even for untrusted strings.
+            fun add(value: String?) {
+                val bytes = value?.toByteArray(Charsets.UTF_8)
+                val length = bytes?.size ?: -1
+                for (shift in 24 downTo 0 step 8) digest.update((length ushr shift).toByte())
+                if (bytes != null) digest.update(bytes)
+            }
+            add(depth.toString())
+            for (field in fields) add(field)
+            add(stamp.bounds)
+            add(stamp.inputType.toString())
+            add(stamp.actions.joinToString(","))
+            add(stamp.state.toString())
+            add(stamp.childCount.toString())
+
+            val interesting = node.isClickable || node.isEditable || node.isScrollable ||
+                !stamp.text.isNullOrBlank() || !stamp.description.isNullOrBlank()
+            if (interesting) {
+                meaningful = true
+                if (elements.size < maxElements) {
+                    val id = elements.size + 1
+                    elements[id] = node
+                    stamps[id] = stamp
+                    if (out != null) {
+                        out.append('[').append(id).append("] ")
+                            .append(stamp.className?.substringAfterLast('.') ?: "View")
+                        if (!node.isEditable) appendData(out, "text", stamp.text)
+                        appendData(out, "description", stamp.description)
+                        appendData(out, "hint", stamp.hint)
+                        if (node.isClickable) out.append(" {click}")
+                        if (node.isEditable) out.append(" {edit}")
+                        if (node.isScrollable) out.append(" {scroll}")
+                        if (!node.isEnabled) out.append(" {disabled}")
+                        out.append('\n')
+                    }
                 }
-                "${windowType(w.type)} window: ${w.title ?: root.packageName}" to root
             }
-        } else {
-            listOfNotNull(service.rootInActiveWindow?.let { "Active window: ${it.packageName}" to it })
-                .also { foreground = it.firstOrNull()?.second?.packageName?.toString() }
-        }
-
-        val screen = Rect().also { service.resources.displayMetrics.let { m -> it.set(0, 0, m.widthPixels, m.heightPixels) } }
-        out.append("Screen size: ${screen.width()}x${screen.height()}. Foreground app: ${foreground ?: "unknown"}\n")
-        for ((label, root) in roots) {
-            out.append("-- $label --\n")
-            walk(root, 0, elements, out, screen, maxElements)
-        }
-        if (elements.size >= maxElements) out.append("(more elements not shown; scroll to see more)\n")
-        return ScreenSnapshot(out.toString(), elements, foreground)
-    }
-
-    private fun walk(
-        node: AccessibilityNodeInfo,
-        depth: Int,
-        elements: MutableMap<Int, AccessibilityNodeInfo>,
-        out: StringBuilder,
-        screen: Rect,
-        maxElements: Int,
-    ) {
-        if (elements.size >= maxElements || !node.isVisibleToUser) return
-        val bounds = Rect().also { node.getBoundsInScreen(it) }
-        if (!Rect.intersects(bounds, screen)) return
-
-        val text = node.text?.toString()?.clean()
-        val desc = node.contentDescription?.toString()?.clean()
-        val hint = node.hintText?.toString()?.clean()
-        val interesting = node.isClickable || node.isLongClickable || node.isEditable || node.isScrollable ||
-            node.isCheckable || !text.isNullOrBlank() || !desc.isNullOrBlank()
-
-        var childDepth = depth
-        if (interesting) {
-            val id = elements.size + 1
-            elements[id] = node
-            val flags = buildList {
-                if (node.isClickable) add("click")
-                if (node.isLongClickable) add("longclick")
-                if (node.isEditable) add("edit")
-                if (node.isScrollable) add("scroll")
-                if (node.isCheckable) add(if (node.isChecked) "checked" else "unchecked")
-                if (node.isSelected) add("selected")
-                if (node.isFocused) add("focused")
-                if (!node.isEnabled) add("disabled")
+            for (i in 0 until stamp.childCount) {
+                val child = node.getChild(i) ?: return false
+                if (!walk(child, depth + 1)) return false
             }
-            out.append("  ".repeat(depth.coerceAtMost(8)))
-            out.append("[$id] ").append(node.className?.toString()?.substringAfterLast('.') ?: "View")
-            if (!text.isNullOrBlank()) out.append(" \"").append(text).append('"')
-            if (!desc.isNullOrBlank() && desc != text) out.append(" desc=\"").append(desc).append('"')
-            if (!hint.isNullOrBlank() && hint != text) out.append(" hint=\"").append(hint).append('"')
-            node.viewIdResourceName?.substringAfter(":id/")?.let { out.append(" id=").append(it) }
-            if (flags.isNotEmpty()) out.append(" {").append(flags.joinToString(",")).append('}')
-            out.append(" @(").append(bounds.centerX()).append(',').append(bounds.centerY()).append(")\n")
-            childDepth = depth + 1
+            return true
         }
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            walk(child, childDepth, elements, out, screen, maxElements)
+
+        if (!foreground.root.isVisibleToUser || !walk(foreground.root, 0) || !meaningful) return null
+        return ScreenSnapshot(out?.toString().orEmpty(), elements,
+            ScreenContext(context, Base64.getEncoder().encodeToString(digest.digest())), stamps)
+    }
+
+    fun isProtectedNode(node: AccessibilityNodeInfo): Boolean {
+        if (node.isPassword || (Build.VERSION.SDK_INT >= 34 && node.isAccessibilityDataSensitive)) return true
+        val type = node.inputType
+        val variation = type and android.text.InputType.TYPE_MASK_VARIATION
+        return when (type and android.text.InputType.TYPE_MASK_CLASS) {
+            android.text.InputType.TYPE_CLASS_TEXT -> variation in textPasswordTypes
+            android.text.InputType.TYPE_CLASS_NUMBER -> variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            else -> false
         }
     }
 
-    private fun String.clean() = replace('\n', ' ').trim().let { if (it.length > MAX_TEXT) it.take(MAX_TEXT) + "…" else it }
-
-    private fun windowType(type: Int) = when (type) {
-        AccessibilityWindowInfo.TYPE_APPLICATION -> "App"
-        AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "Keyboard"
-        AccessibilityWindowInfo.TYPE_SYSTEM -> "System"
-        AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "Divider"
-        else -> "Overlay"
+    private fun appendData(out: StringBuilder, label: String, value: String?) {
+        if (!value.isNullOrBlank()) out.append(' ').append(label).append('=')
+            .append(JSONObject.quote(value.take(MAX_LIST_TEXT)))
     }
+
+    private val textPasswordTypes = setOf(
+        android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD,
+        android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
+        android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+    )
+    private val systemBars = setOf("status_bar", "navigation_bar_frame", "navigation_bar_view")
 }
